@@ -28,7 +28,7 @@ builds:
 
 archives:
   - id: fusiondatacli
-    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     format_overrides:
       - goos: windows
         formats: [zip]
@@ -59,20 +59,25 @@ release:
   footer: |
     ## Install
 
+    **Homebrew (macOS / Linux)**
+    ```
+    brew install schneik80/fusiondatacli/fusiondatacli
+    ```
+
     **macOS (Apple Silicon)**
     ```
-    curl -L https://github.com/schneik80/FusionDataCLI/releases/download/v{{ .Version }}/fusiondatacli_darwin_arm64.tar.gz | tar xz
+    curl -L https://github.com/schneik80/FusionDataCLI/releases/download/v{{ .Version }}/fusiondatacli-{{ .Version }}-darwin-arm64.tar.gz | tar xz
     sudo mv fusiondatacli /usr/local/bin/
     ```
 
     **macOS (Intel)**
     ```
-    curl -L https://github.com/schneik80/FusionDataCLI/releases/download/v{{ .Version }}/fusiondatacli_darwin_amd64.tar.gz | tar xz
+    curl -L https://github.com/schneik80/FusionDataCLI/releases/download/v{{ .Version }}/fusiondatacli-{{ .Version }}-darwin-amd64.tar.gz | tar xz
     sudo mv fusiondatacli /usr/local/bin/
     ```
 
     **Linux**
     ```
-    curl -L https://github.com/schneik80/FusionDataCLI/releases/download/v{{ .Version }}/fusiondatacli_linux_amd64.tar.gz | tar xz
+    curl -L https://github.com/schneik80/FusionDataCLI/releases/download/v{{ .Version }}/fusiondatacli-{{ .Version }}-linux-amd64.tar.gz | tar xz
     sudo mv fusiondatacli /usr/local/bin/
     ```

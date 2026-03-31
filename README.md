@@ -6,27 +6,35 @@ A terminal browser for [Autodesk Platform Services (APS)](https://aps.autodesk.c
 
 ## Install
 
-Download the latest binary for your platform from [Releases](https://github.com/schneik80/FusionDataCLI/releases).
+**Homebrew (macOS / Linux) — recommended**
+```sh
+brew install schneik80/fusiondatacli/fusiondatacli
+```
+
+Or download the latest binary for your platform from [Releases](https://github.com/schneik80/FusionDataCLI/releases).
 
 **macOS (Apple Silicon)**
 ```sh
-curl -L https://github.com/schneik80/FusionDataCLI/releases/latest/download/fusiondatacli_darwin_arm64.tar.gz | tar xz
+VERSION=$(curl -s https://api.github.com/repos/schneik80/FusionDataCLI/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d v)
+curl -L "https://github.com/schneik80/FusionDataCLI/releases/latest/download/fusiondatacli-${VERSION}-darwin-arm64.tar.gz" | tar xz
 sudo mv fusiondatacli /usr/local/bin/
 ```
 
 **macOS (Intel)**
 ```sh
-curl -L https://github.com/schneik80/FusionDataCLI/releases/latest/download/fusiondatacli_darwin_amd64.tar.gz | tar xz
+VERSION=$(curl -s https://api.github.com/repos/schneik80/FusionDataCLI/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d v)
+curl -L "https://github.com/schneik80/FusionDataCLI/releases/latest/download/fusiondatacli-${VERSION}-darwin-amd64.tar.gz" | tar xz
 sudo mv fusiondatacli /usr/local/bin/
 ```
 
 **Linux (amd64)**
 ```sh
-curl -L https://github.com/schneik80/FusionDataCLI/releases/latest/download/fusiondatacli_linux_amd64.tar.gz | tar xz
+VERSION=$(curl -s https://api.github.com/repos/schneik80/FusionDataCLI/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d v)
+curl -L "https://github.com/schneik80/FusionDataCLI/releases/latest/download/fusiondatacli-${VERSION}-linux-amd64.tar.gz" | tar xz
 sudo mv fusiondatacli /usr/local/bin/
 ```
 
-**Windows** — download `fusiondatacli_windows_amd64.zip` from the [Releases](https://github.com/schneik80/FusionDataCLI/releases) page and add the binary to your `PATH`.
+**Windows** — download `fusiondatacli-{version}-windows-amd64.zip` from the [Releases](https://github.com/schneik80/FusionDataCLI/releases) page and add the binary to your `PATH`.
 
 ## Usage
 
