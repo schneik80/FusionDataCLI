@@ -1,0 +1,33 @@
+# Binary
+apsnav
+apsnav.exe
+
+# Build output
+dist/
+bin/
+
+# Go
+*.test
+*.out
+vendor/
+
+# Dependency cache
+go/pkg/
+
+# Auth & config (never commit credentials)
+config/apsnav/
+tokens.json
+config.json
+.env
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
