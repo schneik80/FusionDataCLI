@@ -861,7 +861,16 @@ func (m Model) renderColumn(col int, title string, width, height int) string {
 	} else {
 		items := m.cols[col]
 		if len(items) == 0 {
-			sb.WriteString(styleItemDim.Width(innerWidth).Render("(empty)"))
+			// Distinguish "never loaded" (nil) from "loaded but no content" (non-nil empty slice).
+			if col == colContents && items != nil {
+				sb.WriteString(styleItemDim.Width(innerWidth).Render("No designs found."))
+				sb.WriteString("\n")
+				sb.WriteString(styleItemDim.Width(innerWidth).Render("Project may contain legacy"))
+				sb.WriteString("\n")
+				sb.WriteString(styleItemDim.Width(innerWidth).Render("or non-Fusion content."))
+			} else {
+				sb.WriteString(styleItemDim.Width(innerWidth).Render("(empty)"))
+			}
 		} else {
 			visibleRows := height - 3 // title + bottom margin
 			if visibleRows < 1 {
