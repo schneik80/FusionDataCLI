@@ -11,9 +11,9 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/schneik80/apsnav/api"
-	"github.com/schneik80/apsnav/auth"
-	"github.com/schneik80/apsnav/config"
+	"github.com/schneik80/FusionDataCLI/api"
+	"github.com/schneik80/FusionDataCLI/auth"
+	"github.com/schneik80/FusionDataCLI/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -701,45 +701,41 @@ func (m Model) viewLoading(msg string) string {
 }
 
 func (m Model) viewAuthNeeded() string {
-	title := styleHeader.Render("apsnav")
+	title := styleHeader.Render("FusionDataCLI")
 	body := lipgloss.JoinVertical(lipgloss.Left,
 		title,
 		"",
-		styleStatus.Render("  You need to authenticate with Autodesk Platform Services."),
+		styleStatus.Render("  Sign in with your Autodesk account to continue."),
 		"",
 		styleItemNormal.Render("  Press [Enter] to open your browser and log in."),
-		"",
-		styleItemDim.Render("  Make sure your APS app has the redirect URI:"),
-		styleItemDim.Render("    http://localhost:7879/callback"),
 	)
 	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Center, body)
 }
 
 func (m Model) viewSetupNeeded() string {
 	cfgPath := config.Path()
-	title := styleHeader.Render("apsnav — setup required")
+	title := styleHeader.Render("FusionDataCLI — developer setup")
 	body := lipgloss.JoinVertical(lipgloss.Left,
 		title,
 		"",
-		styleError.Render("  No configuration found."),
+		styleError.Render("  No APS client_id found."),
+		styleItemDim.Render("  This binary was built without an embedded client_id."),
 		"",
-		styleItemNormal.Render("  Create the config file at:"),
+		styleItemNormal.Render("  Option 1 — build with embedded client_id:"),
+		styleItemNormal.Render(`    go build -ldflags \`),
+		styleItemNormal.Render(`      "-X github.com/schneik80/FusionDataCLI/config.DefaultClientID=<id>" .`),
+		"",
+		styleItemNormal.Render("  Option 2 — environment variable:"),
+		styleItemNormal.Render("    APS_CLIENT_ID=<id> apsnav"),
+		"",
+		styleItemNormal.Render("  Option 3 — config file at:"),
 		styleItemNormal.Render("    "+cfgPath),
+		styleItemNormal.Render(`    { "client_id": "<id>" }`),
+		styleItemNormal.Render(`    { "client_id": "<id>", "region": "EMEA" }  ← non-US hubs`),
 		"",
-		styleItemNormal.Render("  With the following contents:"),
-		styleItemNormal.Render(`    {`),
-		styleItemNormal.Render(`      "client_id": "<your-aps-client-id>",`),
-		styleItemNormal.Render(`      "client_secret": "<your-aps-client-secret>",`),
-		styleItemNormal.Render(`      "region": "US"`),
-		styleItemNormal.Render(`    }`),
-		"",
-		styleItemDim.Render("  region: US (default), EMEA, or AUS — must match your Fusion hub region"),
-		"",
-		styleItemDim.Render("  Register your app at: https://aps.autodesk.com/myapps"),
-		styleItemDim.Render("  Set the callback URL to: http://localhost:7879/callback"),
-		styleItemDim.Render("  Required scopes: data:read"),
-		"",
-		styleItemDim.Render("  Or set env vars: APS_CLIENT_ID, APS_CLIENT_SECRET, APS_REGION"),
+		styleItemDim.Render("  Register a public APS app at: https://aps.autodesk.com/myapps"),
+		styleItemDim.Render("  Redirect URI: http://localhost:7879/callback  Scopes: data:read"),
+		styleItemDim.Render("  No client_secret needed for public clients."),
 		"",
 		styleItemDim.Render("  Press [q] to quit."),
 	)
@@ -747,7 +743,7 @@ func (m Model) viewSetupNeeded() string {
 }
 
 func (m Model) viewDebug() string {
-	header := styleHeader.Render("apsnav — debug log") +
+	header := styleHeader.Render("FusionDataCLI — debug log") +
 		styleStatus.Render("  [?] close  [↑↓/jk] scroll")
 	if !api.DebugEnabled() {
 		body := styleItemDim.Render("\n  Debug mode is off. Re-launch with APSNAV_DEBUG=1 to enable logging.\n")
@@ -832,7 +828,7 @@ func (m Model) viewBrowser() string {
 	if m.statusMsg != "" {
 		status = styleStatus.Render(" — " + m.statusMsg)
 	}
-	header := styleHeader.Render("apsnav") + status
+	header := styleHeader.Render("FusionDataCLI") + status
 
 	// Footer
 	footer := styleFooter.Width(m.width - 2).Render(

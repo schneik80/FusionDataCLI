@@ -1,6 +1,10 @@
 # Binary
-apsnav
-apsnav.exe
+fusiondatacli
+fusiondatacli.exe
+
+# Build secrets — store your client_id here, never commit it
+.aps-client-id
+.aps-region
 
 # Build output
 dist/

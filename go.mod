@@ -1,4 +1,4 @@
-module github.com/schneik80/apsnav
+module github.com/schneik80/FusionDataCLI
 
 go 1.22
 

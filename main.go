@@ -5,8 +5,8 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/schneik80/apsnav/config"
-	"github.com/schneik80/apsnav/ui"
+	"github.com/schneik80/FusionDataCLI/config"
+	"github.com/schneik80/FusionDataCLI/ui"
 )
 
 func main() {
