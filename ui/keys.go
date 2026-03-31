@@ -13,6 +13,7 @@ type keyMap struct {
 	OpenViewer  key.Binding
 	Refresh     key.Binding
 	Details     key.Binding
+	About       key.Binding
 	Debug       key.Binding
 	Quit        key.Binding
 }
@@ -57,6 +58,10 @@ var keys = keyMap{
 	Details: key.NewBinding(
 		key.WithKeys("d"),
 		key.WithHelp("d", "details"),
+	),
+	About: key.NewBinding(
+		key.WithKeys("a"),
+		key.WithHelp("a", "about"),
 	),
 	Debug: key.NewBinding(
 		key.WithKeys("?"),

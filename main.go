@@ -9,11 +9,14 @@ import (
 	"github.com/schneik80/FusionDataCLI/ui"
 )
 
+// version is set at build time via -ldflags "-X main.version=x.y.z".
+var version = "dev"
+
 func main() {
 	cfg, cfgErr := config.Load()
 
 	p := tea.NewProgram(
-		ui.New(cfg, cfgErr),
+		ui.New(cfg, cfgErr, version),
 		tea.WithAltScreen(),
 	)
 	if _, err := p.Run(); err != nil {

@@ -12,6 +12,7 @@ builds:
     binary: fusiondatacli
     ldflags:
       - -s -w
+      - -X main.version={{ .Version }}
       - -X github.com/schneik80/FusionDataCLI/config.DefaultClientID={{ .Env.APS_CLIENT_ID }}
     env:
       - CGO_ENABLED=0

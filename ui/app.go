@@ -28,6 +28,7 @@ const (
 	stateAuthNeeded                  // no token; prompt user to log in
 	stateAuthWaiting                 // browser opened; waiting for callback
 	stateBrowsing                    // main 3-column browser
+	stateAbout                       // about / license overlay
 	stateDebug                       // debug log overlay
 	stateError                       // unrecoverable error
 )
@@ -65,6 +66,7 @@ type Model struct {
 	height   int
 	err      error
 	statusMsg string
+	version   string
 
 	// Auth
 	token        string
@@ -87,7 +89,8 @@ type Model struct {
 	details        *api.ItemDetails
 	detailsScroll  int
 
-	// Debug log overlay
+	// About / debug overlay scroll
+	aboutScroll int
 	debugScroll int
 
 	// For column 2: when drilling into a subfolder, track the stack so we can go back.
@@ -106,7 +109,7 @@ type Model struct {
 
 // New creates the initial model. cfgErr may be non-nil when the config file is
 // missing or invalid; the app will display a setup screen in that case.
-func New(cfg *config.Config, cfgErr error) Model {
+func New(cfg *config.Config, cfgErr error, version string) Model {
 	if os.Getenv("APSNAV_DEBUG") != "" {
 		api.EnableDebug()
 	}
@@ -122,6 +125,7 @@ func New(cfg *config.Config, cfgErr error) Model {
 			state:   stateSetupNeeded,
 			err:     cfgErr,
 			spinner: sp,
+			version: version,
 		}
 	}
 
@@ -130,6 +134,7 @@ func New(cfg *config.Config, cfgErr error) Model {
 		clientID:     cfg.ClientID,
 		clientSecret: cfg.ClientSecret,
 		spinner:      sp,
+		version:      version,
 	}
 }
 
@@ -373,6 +378,30 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, keys.Quit):
 		return m, tea.Quit
+
+	case key.Matches(msg, keys.About):
+		if m.state == stateAbout {
+			m.state = stateBrowsing
+		} else if m.state == stateBrowsing || m.state == stateAuthNeeded {
+			m.aboutScroll = 0
+			m.state = stateAbout
+		}
+		return m, nil
+
+	case m.state == stateAbout && key.Matches(msg, keys.Up):
+		if m.aboutScroll > 0 {
+			m.aboutScroll--
+		}
+		return m, nil
+
+	case m.state == stateAbout && key.Matches(msg, keys.Down):
+		m.aboutScroll++
+		return m, nil
+
+	case m.state == stateAbout:
+		// any other key closes about
+		m.state = stateBrowsing
+		return m, nil
 
 	case key.Matches(msg, keys.Debug):
 		if m.state == stateDebug {
@@ -686,6 +715,8 @@ func (m Model) View() string {
 		return m.viewAuthNeeded()
 	case stateAuthWaiting:
 		return m.viewLoading("Waiting for browser authentication…")
+	case stateAbout:
+		return m.viewAbout()
 	case stateDebug:
 		return m.viewDebug()
 	case stateError:
@@ -775,6 +806,93 @@ func (m Model) viewDebug() string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, sb.String(), footer)
 }
 
+func (m Model) viewAbout() string {
+	ver := m.version
+	if ver == "" {
+		ver = "dev"
+	}
+
+	// Build scrollable content lines
+	lines := []string{
+		styleHeader.Render("FusionDataCLI  v" + ver),
+		"",
+		styleItemNormal.Render("  A terminal browser for Autodesk Platform Services"),
+		styleItemNormal.Render("  Manufacturing Data Model — navigate Fusion 360 hubs,"),
+		styleItemNormal.Render("  projects, folders, and designs from the command line."),
+		"",
+		styleItemDim.Render("  https://github.com/schneik80/FusionDataCLI"),
+		"",
+		styleColumnTitle.MarginBottom(0).Render("Copyright:"),
+		styleItemNormal.Render("  © 2025 Kevin Schneider"),
+		"",
+		styleColumnTitle.MarginBottom(0).Render("License:"),
+		styleItemNormal.Render("  MIT License"),
+		"",
+		styleItemNormal.Render("  Permission is hereby granted, free of charge, to any person"),
+		styleItemNormal.Render("  obtaining a copy of this software and associated documentation"),
+		styleItemNormal.Render("  files (the \"Software\"), to deal in the Software without"),
+		styleItemNormal.Render("  restriction, including without limitation the rights to use,"),
+		styleItemNormal.Render("  copy, modify, merge, publish, distribute, sublicense, and/or"),
+		styleItemNormal.Render("  sell copies of the Software, and to permit persons to whom the"),
+		styleItemNormal.Render("  Software is furnished to do so, subject to the following"),
+		styleItemNormal.Render("  conditions:"),
+		"",
+		styleItemNormal.Render("  The above copyright notice and this permission notice shall be"),
+		styleItemNormal.Render("  included in all copies or substantial portions of the Software."),
+		"",
+		styleItemNormal.Render("  THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,"),
+		styleItemNormal.Render("  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES"),
+		styleItemNormal.Render("  OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND"),
+		styleItemNormal.Render("  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT"),
+		styleItemNormal.Render("  HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,"),
+		styleItemNormal.Render("  WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING"),
+		styleItemNormal.Render("  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR"),
+		styleItemNormal.Render("  OTHER DEALINGS IN THE SOFTWARE."),
+		"",
+		styleColumnTitle.MarginBottom(0).Render("Open Source:"),
+		styleItemNormal.Render("  This application uses the following open source libraries:"),
+		"",
+		styleItemNormal.Render("  Charm.sh bubbletea"),
+		styleItemDim.Render("    TUI framework — github.com/charmbracelet/bubbletea"),
+		styleItemDim.Render("    MIT License — © Charmbracelet, Inc."),
+		"",
+		styleItemNormal.Render("  Charm.sh bubbles"),
+		styleItemDim.Render("    TUI components — github.com/charmbracelet/bubbles"),
+		styleItemDim.Render("    MIT License — © Charmbracelet, Inc."),
+		"",
+		styleItemNormal.Render("  Charm.sh lipgloss"),
+		styleItemDim.Render("    Terminal styling — github.com/charmbracelet/lipgloss"),
+		styleItemDim.Render("    MIT License — © Charmbracelet, Inc."),
+		"",
+		styleColumnTitle.MarginBottom(0).Render("Autodesk Platform Services:"),
+		styleItemNormal.Render("  Powered by the APS Manufacturing Data Model API."),
+		styleItemDim.Render("  Autodesk, Fusion 360, and related marks are trademarks of"),
+		styleItemDim.Render("  Autodesk, Inc. This application is not affiliated with or"),
+		styleItemDim.Render("  endorsed by Autodesk, Inc."),
+		"",
+		styleItemDim.Render("  https://aps.autodesk.com"),
+		"",
+		styleItemDim.Render("  [↑↓/jk] scroll  [a] close"),
+	}
+
+	// Scroll window
+	visibleH := m.height - 2
+	if visibleH < 1 {
+		visibleH = 1
+	}
+	maxScroll := max(0, len(lines)-visibleH)
+	scroll := clamp(m.aboutScroll, 0, maxScroll)
+
+	end := min(scroll+visibleH, len(lines))
+	var sb strings.Builder
+	for _, l := range lines[scroll:end] {
+		sb.WriteString(l)
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
 func (m Model) viewError() string {
 	msg := "unknown error"
 	if m.err != nil {
@@ -832,7 +950,7 @@ func (m Model) viewBrowser() string {
 
 	// Footer
 	footer := styleFooter.Width(m.width - 2).Render(
-		"[↑↓/jk] move  [←→/hl] navigate  [o] open  [f] Fusion  [v] viewer  [r] refresh  [?] debug  [q] quit",
+		"[↑↓/jk] move  [←→/hl] navigate  [o] open  [f] Fusion  [v] viewer  [r] refresh  [a] about  [q] quit",
 	)
 
 	return lipgloss.JoinVertical(lipgloss.Left,
