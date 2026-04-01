@@ -32,3 +32,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APS_CLIENT_ID: ${{ secrets.APS_CLIENT_ID }}
+
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: Justintime50/homebrew-releaser@v3
+        with:
+          homebrew_owner: schneik80
+          homebrew_tap: homebrew-fusiondatacli
+          formula_folder: Formula
+          github_token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          commit_owner: homebrew-releaser
+          commit_email: homebrew-releaser@example.com
+          install: 'bin.install "fusiondatacli"'
+          target_darwin_amd64: true
+          target_darwin_arm64: true
+          target_linux_amd64: true
+          target_linux_arm64: true
+          debug: false
