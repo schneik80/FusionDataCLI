@@ -51,8 +51,7 @@ type (
 	projectsLoadedMsg  struct{ items []api.NavItem }
 	contentsLoadedMsg  struct{ items []api.NavItem }
 	detailsLoadedMsg   struct{ details *api.ItemDetails }
-	introspectDoneMsg  struct{ err error }
-	errMsg             struct{ err error }
+	errMsg            struct{ err error }
 	openedBrowserMsg   struct{}
 )
 
@@ -285,25 +284,6 @@ func openViewerCmd(overviewURL string) tea.Cmd {
 	}
 }
 
-func introspectCmd(token string) tea.Cmd {
-	types := []string{"ProjectFilter", "Project", "Hub", "HubFilter", "PaginationInput"}
-	return func() tea.Msg {
-		ctx := context.Background()
-		api.AppendDebugLine("--- schema introspection ---")
-		for _, t := range types {
-			lines, err := api.IntrospectTypeFields(ctx, token, t)
-			if err != nil {
-				api.AppendDebugLine("  error querying " + t + ": " + err.Error())
-				continue
-			}
-			for _, l := range lines {
-				api.AppendDebugLine(l)
-			}
-		}
-		return introspectDoneMsg{}
-	}
-}
-
 func openBrowserCmd(item api.NavItem, hubAltID, projectAltID string) tea.Cmd {
 	return func() tea.Msg {
 		u := itemWebURL(item, hubAltID, projectAltID)
@@ -378,10 +358,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detailsScroll = 0
 		return m, nil
 
-	case introspectDoneMsg:
-		m.statusMsg = "Schema introspection complete — open debug log [?]"
-		return m, nil
-
 	case openedBrowserMsg:
 		m.statusMsg = "Opened in browser"
 		return m, nil
@@ -446,12 +422,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.debugScroll++
 		return m, nil
 
-	case m.state == stateDebug && key.Matches(msg, keys.Introspect):
-		if m.token != "" {
-			return m, introspectCmd(m.token)
-		}
-		return m, nil
-
 	case m.state == stateAuthNeeded && key.Matches(msg, keys.Enter):
 		m.state = stateAuthWaiting
 		return m, tea.Batch(m.spinner.Tick, loginCmd(m.clientID, m.clientSecret))
@@ -494,12 +464,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Refresh):
 		return m.refresh()
 
-	case key.Matches(msg, keys.Introspect):
-		if m.token != "" {
-			m.debugScroll = 0
-			m.state = stateDebug
-			return m, introspectCmd(m.token)
-		}
 	}
 
 	return m, nil
@@ -812,7 +776,7 @@ func (m Model) viewSetupNeeded() string {
 
 func (m Model) viewDebug() string {
 	header := styleHeader.Render("FusionDataCLI — debug log") +
-		styleStatus.Render("  [?] close  [↑↓/jk] scroll  [i] introspect schema")
+		styleStatus.Render("  [?] close  [↑↓/jk] scroll")
 	if !api.DebugEnabled() {
 		body := styleItemDim.Render("\n  Debug mode is off. Re-launch with APSNAV_DEBUG=1 to enable logging.\n")
 		return lipgloss.JoinVertical(lipgloss.Left, header, body)

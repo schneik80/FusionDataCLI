@@ -37,17 +37,6 @@ func DebugLines() []string {
 	return cp
 }
 
-// AppendDebugLine writes a pre-formatted line to the debug log regardless of
-// whether debug mode is enabled. Used to surface introspection results.
-func AppendDebugLine(line string) {
-	dbgMu.Lock()
-	defer dbgMu.Unlock()
-	dbgLines = append(dbgLines, line)
-	if len(dbgLines) > maxDebugLines {
-		dbgLines = dbgLines[len(dbgLines)-maxDebugLines:]
-	}
-}
-
 func dbgLog(format string, args ...any) {
 	dbgMu.Lock()
 	defer dbgMu.Unlock()
