@@ -16,21 +16,21 @@ Or download the latest binary for your platform from [Releases](https://github.c
 **macOS (Apple Silicon)**
 ```sh
 VERSION=$(curl -s https://api.github.com/repos/schneik80/FusionDataCLI/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d v)
-curl -L "https://github.com/schneik80/FusionDataCLI/releases/latest/download/fusiondatacli-${VERSION}-darwin-arm64.tar.gz" | tar xz
+curl -L "https://github.com/schneik80/FusionDataCLI/releases/latest/download/FusionDataCLI-${VERSION}-darwin-arm64.tar.gz" | tar xz
 sudo mv fusiondatacli /usr/local/bin/
 ```
 
 **macOS (Intel)**
 ```sh
 VERSION=$(curl -s https://api.github.com/repos/schneik80/FusionDataCLI/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d v)
-curl -L "https://github.com/schneik80/FusionDataCLI/releases/latest/download/fusiondatacli-${VERSION}-darwin-amd64.tar.gz" | tar xz
+curl -L "https://github.com/schneik80/FusionDataCLI/releases/latest/download/FusionDataCLI-${VERSION}-darwin-amd64.tar.gz" | tar xz
 sudo mv fusiondatacli /usr/local/bin/
 ```
 
 **Linux (amd64)**
 ```sh
 VERSION=$(curl -s https://api.github.com/repos/schneik80/FusionDataCLI/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d v)
-curl -L "https://github.com/schneik80/FusionDataCLI/releases/latest/download/fusiondatacli-${VERSION}-linux-amd64.tar.gz" | tar xz
+curl -L "https://github.com/schneik80/FusionDataCLI/releases/latest/download/FusionDataCLI-${VERSION}-linux-amd64.tar.gz" | tar xz
 sudo mv fusiondatacli /usr/local/bin/
 ```
 
@@ -51,8 +51,9 @@ On first run the app opens your browser for Autodesk sign-in. After authenticati
 | `←` / `h` | Go back |
 | `o` | Open in browser |
 | `f` | Open in Fusion desktop |
-| `v` | Open web viewer |
 | `d` | Toggle details panel |
+| `t` | Cycle color theme |
+| `a` | About / license |
 | `r` | Refresh |
 | `?` | Debug log |
 | `q` | Quit |

@@ -1,6 +1,6 @@
 version: 2
 
-project_name: fusiondatacli
+project_name: FusionDataCLI
 
 before:
   hooks:
@@ -67,18 +67,18 @@ release:
 
     **macOS (Apple Silicon)**
     ```
-    curl -L https://github.com/schneik80/FusionDataCLI/releases/download/v{{ .Version }}/fusiondatacli-{{ .Version }}-darwin-arm64.tar.gz | tar xz
+    curl -L https://github.com/schneik80/FusionDataCLI/releases/download/v{{ .Version }}/FusionDataCLI-{{ .Version }}-darwin-arm64.tar.gz | tar xz
     sudo mv fusiondatacli /usr/local/bin/
     ```
 
     **macOS (Intel)**
     ```
-    curl -L https://github.com/schneik80/FusionDataCLI/releases/download/v{{ .Version }}/fusiondatacli-{{ .Version }}-darwin-amd64.tar.gz | tar xz
+    curl -L https://github.com/schneik80/FusionDataCLI/releases/download/v{{ .Version }}/FusionDataCLI-{{ .Version }}-darwin-amd64.tar.gz | tar xz
     sudo mv fusiondatacli /usr/local/bin/
     ```
 
     **Linux**
     ```
-    curl -L https://github.com/schneik80/FusionDataCLI/releases/download/v{{ .Version }}/fusiondatacli-{{ .Version }}-linux-amd64.tar.gz | tar xz
+    curl -L https://github.com/schneik80/FusionDataCLI/releases/download/v{{ .Version }}/FusionDataCLI-{{ .Version }}-linux-amd64.tar.gz | tar xz
     sudo mv fusiondatacli /usr/local/bin/
     ```
