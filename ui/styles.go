@@ -7,42 +7,46 @@ import "github.com/charmbracelet/lipgloss"
 // ---------------------------------------------------------------------------
 
 type colorTheme struct {
-	name   string
-	accent lipgloss.Color
-	subtle lipgloss.Color
-	muted  lipgloss.Color
-	fg     lipgloss.Color
-	errCol lipgloss.Color
+	name      string
+	accent    lipgloss.Color
+	subtle    lipgloss.Color
+	muted     lipgloss.Color
+	fg        lipgloss.Color
+	errCol    lipgloss.Color
+	detailKey lipgloss.Color // label color for detail panel metadata keys
 }
 
 var themes = []colorTheme{
 	{
 		// Rust — original warm orange palette
-		name:   "Rust",
-		accent: lipgloss.Color("#C05A1F"),
-		subtle: lipgloss.Color("#555555"),
-		muted:  lipgloss.Color("#888888"),
-		fg:     lipgloss.Color("#FFFFFF"),
-		errCol: lipgloss.Color("#FF5555"),
+		name:      "Rust",
+		accent:    lipgloss.Color("#C05A1F"),
+		subtle:    lipgloss.Color("#555555"),
+		muted:     lipgloss.Color("#888888"),
+		fg:        lipgloss.Color("#FFFFFF"),
+		errCol:    lipgloss.Color("#FF5555"),
+		detailKey: lipgloss.Color("#888888"),
 	},
 	{
 		// Mono — greyscale only
-		name:   "Mono",
-		accent: lipgloss.Color("#CCCCCC"),
-		subtle: lipgloss.Color("#444444"),
-		muted:  lipgloss.Color("#777777"),
-		fg:     lipgloss.Color("#FFFFFF"),
-		errCol: lipgloss.Color("#AAAAAA"),
+		name:      "Mono",
+		accent:    lipgloss.Color("#CCCCCC"),
+		subtle:    lipgloss.Color("#444444"),
+		muted:     lipgloss.Color("#777777"),
+		fg:        lipgloss.Color("#FFFFFF"),
+		errCol:    lipgloss.Color("#AAAAAA"),
+		detailKey: lipgloss.Color("#999999"),
 	},
 	{
 		// System — ANSI color tokens; inherits the terminal's own color scheme
 		// (same colors ls uses: blue for directories, bright-black for dim text)
-		name:   "System",
-		accent: lipgloss.Color("4"),  // ANSI blue  — directories in ls
-		subtle: lipgloss.Color("8"),  // ANSI bright-black — dim / inactive
-		muted:  lipgloss.Color("8"),  // ANSI bright-black
-		fg:     lipgloss.Color("7"),  // ANSI white  — normal foreground
-		errCol: lipgloss.Color("1"),  // ANSI red
+		name:      "System",
+		accent:    lipgloss.Color("4"),  // ANSI blue         — directories in ls
+		subtle:    lipgloss.Color("8"),  // ANSI bright-black — dim / inactive
+		muted:     lipgloss.Color("8"),  // ANSI bright-black
+		fg:        lipgloss.Color("7"),  // ANSI white        — normal foreground
+		errCol:    lipgloss.Color("1"),  // ANSI red
+		detailKey: lipgloss.Color("6"),  // ANSI cyan         — high contrast label color
 	},
 }
 
@@ -78,6 +82,7 @@ var (
 	styleLoading        lipgloss.Style
 	styleError          lipgloss.Style
 	styleKindBadge      lipgloss.Style
+	styleDetailKey      lipgloss.Style
 )
 
 func applyTheme(t colorTheme) {
@@ -143,6 +148,9 @@ func applyTheme(t colorTheme) {
 	styleKindBadge = lipgloss.NewStyle().
 		Foreground(colorMuted).
 		Faint(true)
+
+	styleDetailKey = lipgloss.NewStyle().
+		Foreground(t.detailKey)
 }
 
 func init() {

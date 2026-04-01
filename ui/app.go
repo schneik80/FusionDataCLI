@@ -1100,7 +1100,7 @@ func buildDetailLines(d *api.ItemDetails, width int) []string {
 		if v == "" {
 			return ""
 		}
-		key := styleItemDim.Render(k)
+		key := styleDetailKey.Render(k)
 		return truncate(key+" "+v, width)
 	}
 	heading := func(s string) string {
