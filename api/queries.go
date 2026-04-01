@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // allPages calls the API repeatedly until no next-page cursor is returned.
@@ -143,29 +144,35 @@ func GetHubs(ctx context.Context, token string) ([]NavItem, error) {
 func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetProjects($hubId: ID!) {
-			projects(hubId: $hubId, pagination: { limit: 50 }) {
-				pagination { cursor }
-				results {
-					id name fusionWebUrl
-					alternativeIdentifiers { dataManagementAPIProjectId }
+			hub(hubId: $hubId) {
+				projects(pagination: { limit: 50 }) {
+					pagination { cursor }
+					results {
+						id name fusionWebUrl projectStatus projectType
+						alternativeIdentifiers { dataManagementAPIProjectId }
+					}
 				}
 			}
 		}`
 	const qNext = `
 		query GetProjectsNext($hubId: ID!, $cursor: String!) {
-			projects(hubId: $hubId, pagination: { cursor: $cursor, limit: 50 }) {
-				pagination { cursor }
-				results {
-					id name fusionWebUrl
-					alternativeIdentifiers { dataManagementAPIProjectId }
+			hub(hubId: $hubId) {
+				projects(pagination: { cursor: $cursor, limit: 50 }) {
+					pagination { cursor }
+					results {
+						id name fusionWebUrl projectStatus projectType
+						alternativeIdentifiers { dataManagementAPIProjectId }
+					}
 				}
 			}
 		}`
 
 	type projectResult struct {
-		ID           string `json:"id"`
-		Name         string `json:"name"`
-		FusionWebURL string `json:"fusionWebUrl"`
+		ID            string `json:"id"`
+		Name          string `json:"name"`
+		FusionWebURL  string `json:"fusionWebUrl"`
+		ProjectStatus string `json:"projectStatus"`
+		ProjectType   string `json:"projectType"`
 		AlternativeIdentifiers struct {
 			DataManagementAPIProjectID string `json:"dataManagementAPIProjectId"`
 		} `json:"alternativeIdentifiers"`
@@ -173,16 +180,18 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 
 	pages, err := allPages(ctx, token, qFirst, qNext, map[string]any{"hubId": hubID}, func(data json.RawMessage) (pageResult, error) {
 		var r struct {
-			Projects struct {
-				Pagination struct{ Cursor string `json:"cursor"` } `json:"pagination"`
-				Results    []projectResult                         `json:"results"`
-			} `json:"projects"`
+			Hub struct {
+				Projects struct {
+					Pagination struct{ Cursor string `json:"cursor"` } `json:"pagination"`
+					Results    []projectResult                         `json:"results"`
+				} `json:"projects"`
+			} `json:"hub"`
 		}
 		if err := json.Unmarshal(data, &r); err != nil {
 			return pageResult{}, fmt.Errorf("projects: %w", err)
 		}
-		raw, _ := json.Marshal(r.Projects.Results)
-		return pageResult{cursor: r.Projects.Pagination.Cursor, data: raw}, nil
+		raw, _ := json.Marshal(r.Hub.Projects.Results)
+		return pageResult{cursor: r.Hub.Projects.Pagination.Cursor, data: raw}, nil
 	})
 	if err != nil {
 		return nil, err
@@ -197,16 +206,19 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 		all = append(all, batch...)
 	}
 
-	items := make([]NavItem, len(all))
-	for i, p := range all {
-		items[i] = NavItem{
+	var items []NavItem
+	for _, p := range all {
+		if strings.EqualFold(p.ProjectStatus, "inactive") {
+			continue
+		}
+		items = append(items, NavItem{
 			ID:          p.ID,
 			Name:        p.Name,
 			Kind:        "project",
 			AltID:       p.AlternativeIdentifiers.DataManagementAPIProjectID,
 			WebURL:      p.FusionWebURL,
 			IsContainer: true,
-		}
+		})
 	}
 	return items, nil
 }
