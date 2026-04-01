@@ -1024,7 +1024,11 @@ func (m Model) renderColumn(col int, title string, width, height int) string {
 						Foreground(colorAccent).
 						Render(label)
 				default:
-					line = styleItemNormal.Width(innerWidth).Render(label)
+					if item.IsContainer {
+						line = styleContainerItem.Width(innerWidth).Render(label)
+					} else {
+						line = styleDocumentItem.Width(innerWidth).Render(label)
+					}
 				}
 				sb.WriteString(line)
 				if i < end-1 {

@@ -7,14 +7,16 @@ import "github.com/charmbracelet/lipgloss"
 // ---------------------------------------------------------------------------
 
 type colorTheme struct {
-	name      string
-	accent    lipgloss.Color
-	subtle    lipgloss.Color
-	muted     lipgloss.Color
-	fg        lipgloss.Color
-	errCol    lipgloss.Color
-	detailKey lipgloss.Color // label color for detail panel metadata keys
-	loading   lipgloss.Color // color for loading spinners and empty state text
+	name        string
+	accent      lipgloss.Color
+	subtle      lipgloss.Color
+	muted       lipgloss.Color
+	fg          lipgloss.Color
+	errCol      lipgloss.Color
+	detailKey   lipgloss.Color // label color for detail panel metadata keys
+	loading     lipgloss.Color // color for loading spinners and empty state text
+	containerFg lipgloss.Color // hubs, projects, folders
+	documentFg  lipgloss.Color // designs, drawings
 }
 
 var themes = []colorTheme{
@@ -26,30 +28,36 @@ var themes = []colorTheme{
 		muted:     lipgloss.Color("#888888"),
 		fg:        lipgloss.Color("#FFFFFF"),
 		errCol:    lipgloss.Color("#FF5555"),
-		detailKey: lipgloss.Color("#888888"),
-		loading:   lipgloss.Color("#888888"),
+		detailKey:   lipgloss.Color("#888888"),
+		loading:     lipgloss.Color("#888888"),
+		containerFg: lipgloss.Color("#89B4D4"), // steel blue — complement to rust orange
+		documentFg:  lipgloss.Color("#FFFFFF"), // white
 	},
 	{
 		// Mono — greyscale only
-		name:      "Mono",
-		accent:    lipgloss.Color("#CCCCCC"),
-		subtle:    lipgloss.Color("#444444"),
-		muted:     lipgloss.Color("#777777"),
-		fg:        lipgloss.Color("#FFFFFF"),
-		errCol:    lipgloss.Color("#AAAAAA"),
-		detailKey: lipgloss.Color("#999999"),
-		loading:   lipgloss.Color("#777777"),
+		name:        "Mono",
+		accent:      lipgloss.Color("#CCCCCC"),
+		subtle:      lipgloss.Color("#444444"),
+		muted:       lipgloss.Color("#777777"),
+		fg:          lipgloss.Color("#FFFFFF"),
+		errCol:      lipgloss.Color("#AAAAAA"),
+		detailKey:   lipgloss.Color("#999999"),
+		loading:     lipgloss.Color("#777777"),
+		containerFg: lipgloss.Color("#EEEEEE"), // bright grey — structural elements
+		documentFg:  lipgloss.Color("#AAAAAA"), // mid grey    — data items recede
 	},
 	{
 		// System — ANSI color tokens; inherits the terminal's own color scheme
-		name:      "System",
-		accent:    lipgloss.Color("6"),  // ANSI cyan         — high contrast accent
-		subtle:    lipgloss.Color("8"),  // ANSI bright-black — dim / inactive
-		muted:     lipgloss.Color("8"),  // ANSI bright-black
-		fg:        lipgloss.Color("7"),  // ANSI white        — normal foreground
-		errCol:    lipgloss.Color("1"),  // ANSI red
-		detailKey: lipgloss.Color("6"),  // ANSI cyan         — high contrast label color
-		loading:   lipgloss.Color("3"),  // ANSI yellow       — loading / empty state
+		name:        "System",
+		accent:      lipgloss.Color("6"),  // ANSI cyan         — high contrast accent
+		subtle:      lipgloss.Color("8"),  // ANSI bright-black — dim / inactive
+		muted:       lipgloss.Color("8"),  // ANSI bright-black
+		fg:          lipgloss.Color("7"),  // ANSI white        — normal foreground
+		errCol:      lipgloss.Color("1"),  // ANSI red
+		detailKey:   lipgloss.Color("6"),  // ANSI cyan         — high contrast label color
+		loading:     lipgloss.Color("3"),  // ANSI yellow       — loading / empty state
+		containerFg: lipgloss.Color("2"),  // ANSI green        — directories in ls
+		documentFg:  lipgloss.Color("7"),  // ANSI white        — regular files
 	},
 }
 
@@ -84,9 +92,11 @@ var (
 	styleFooter         lipgloss.Style
 	styleLoading        lipgloss.Style
 	styleError          lipgloss.Style
-	styleKindBadge      lipgloss.Style
-	styleDetailKey      lipgloss.Style
-	styleEmpty          lipgloss.Style
+	styleKindBadge       lipgloss.Style
+	styleDetailKey       lipgloss.Style
+	styleEmpty           lipgloss.Style
+	styleContainerItem   lipgloss.Style
+	styleDocumentItem    lipgloss.Style
 )
 
 func applyTheme(t colorTheme) {
@@ -159,6 +169,14 @@ func applyTheme(t colorTheme) {
 
 	styleDetailKey = lipgloss.NewStyle().
 		Foreground(t.detailKey)
+
+	styleContainerItem = lipgloss.NewStyle().
+		Foreground(t.containerFg).
+		Padding(0, 1)
+
+	styleDocumentItem = lipgloss.NewStyle().
+		Foreground(t.documentFg).
+		Padding(0, 1)
 }
 
 func init() {
