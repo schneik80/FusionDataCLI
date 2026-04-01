@@ -1158,11 +1158,12 @@ func buildDetailLines(d *api.ItemDetails, width int) []string {
 	// Version history
 	if len(d.Versions) > 0 {
 		add(heading("Versions"))
-		for i, v := range d.Versions {
-			if i >= 10 {
+		for i := len(d.Versions) - 1; i >= 0; i-- {
+			if len(d.Versions)-1-i >= 10 {
 				add(styleItemDim.Render(fmt.Sprintf("  … %d more", len(d.Versions)-10)))
 				break
 			}
+			v := d.Versions[i]
 			date := ""
 			if !v.CreatedOn.IsZero() {
 				date = v.CreatedOn.Format("Jan 02 2006")
