@@ -14,6 +14,7 @@ type keyMap struct {
 	Refresh     key.Binding
 	Details     key.Binding
 	About       key.Binding
+	Introspect  key.Binding
 	Debug       key.Binding
 	Quit        key.Binding
 }
@@ -62,6 +63,10 @@ var keys = keyMap{
 	About: key.NewBinding(
 		key.WithKeys("a"),
 		key.WithHelp("a", "about"),
+	),
+	Introspect: key.NewBinding(
+		key.WithKeys("i"),
+		key.WithHelp("i", "introspect schema"),
 	),
 	Debug: key.NewBinding(
 		key.WithKeys("?"),
