@@ -14,6 +14,7 @@ type colorTheme struct {
 	fg        lipgloss.Color
 	errCol    lipgloss.Color
 	detailKey lipgloss.Color // label color for detail panel metadata keys
+	loading   lipgloss.Color // color for loading spinners and empty state text
 }
 
 var themes = []colorTheme{
@@ -26,6 +27,7 @@ var themes = []colorTheme{
 		fg:        lipgloss.Color("#FFFFFF"),
 		errCol:    lipgloss.Color("#FF5555"),
 		detailKey: lipgloss.Color("#888888"),
+		loading:   lipgloss.Color("#888888"),
 	},
 	{
 		// Mono — greyscale only
@@ -36,10 +38,10 @@ var themes = []colorTheme{
 		fg:        lipgloss.Color("#FFFFFF"),
 		errCol:    lipgloss.Color("#AAAAAA"),
 		detailKey: lipgloss.Color("#999999"),
+		loading:   lipgloss.Color("#777777"),
 	},
 	{
 		// System — ANSI color tokens; inherits the terminal's own color scheme
-		// (same colors ls uses: blue for directories, bright-black for dim text)
 		name:      "System",
 		accent:    lipgloss.Color("6"),  // ANSI cyan         — high contrast accent
 		subtle:    lipgloss.Color("8"),  // ANSI bright-black — dim / inactive
@@ -47,6 +49,7 @@ var themes = []colorTheme{
 		fg:        lipgloss.Color("7"),  // ANSI white        — normal foreground
 		errCol:    lipgloss.Color("1"),  // ANSI red
 		detailKey: lipgloss.Color("6"),  // ANSI cyan         — high contrast label color
+		loading:   lipgloss.Color("3"),  // ANSI yellow       — loading / empty state
 	},
 }
 
@@ -83,6 +86,7 @@ var (
 	styleError          lipgloss.Style
 	styleKindBadge      lipgloss.Style
 	styleDetailKey      lipgloss.Style
+	styleEmpty          lipgloss.Style
 )
 
 func applyTheme(t colorTheme) {
@@ -136,8 +140,12 @@ func applyTheme(t colorTheme) {
 		Padding(0, 1)
 
 	styleLoading = lipgloss.NewStyle().
-		Foreground(colorMuted).
+		Foreground(t.loading).
 		Italic(true).
+		Padding(0, 1)
+
+	styleEmpty = lipgloss.NewStyle().
+		Foreground(t.loading).
 		Padding(0, 1)
 
 	styleError = lipgloss.NewStyle().

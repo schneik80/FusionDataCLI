@@ -466,6 +466,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Theme):
 		name := cycleTheme()
+		m.spinner.Style = styleLoading
 		m.statusMsg = "Theme: " + name
 		return m, nil
 	}
@@ -986,13 +987,13 @@ func (m Model) renderColumn(col int, title string, width, height int) string {
 		if len(items) == 0 {
 			// Distinguish "never loaded" (nil) from "loaded but no content" (non-nil empty slice).
 			if col == colContents && items != nil {
-				sb.WriteString(styleItemDim.Width(innerWidth).Render("No designs found."))
+				sb.WriteString(styleEmpty.Width(innerWidth).Render("No designs found."))
 				sb.WriteString("\n")
-				sb.WriteString(styleItemDim.Width(innerWidth).Render("Project may contain legacy"))
+				sb.WriteString(styleEmpty.Width(innerWidth).Render("Project may contain legacy"))
 				sb.WriteString("\n")
-				sb.WriteString(styleItemDim.Width(innerWidth).Render("or non-Fusion content."))
+				sb.WriteString(styleEmpty.Width(innerWidth).Render("or non-Fusion content."))
 			} else {
-				sb.WriteString(styleItemDim.Width(innerWidth).Render("(empty)"))
+				sb.WriteString(styleEmpty.Width(innerWidth).Render("(empty)"))
 			}
 		} else {
 			visibleRows := height - 3 // title + bottom margin
