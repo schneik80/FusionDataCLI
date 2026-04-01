@@ -68,7 +68,7 @@ func allPages(
 func GetHubs(ctx context.Context, token string) ([]NavItem, error) {
 	const qFirst = `
 		query GetHubs {
-			hubs(pagination: { limit: 100 }) {
+			hubs(pagination: { limit: 50 }) {
 				pagination { cursor }
 				results {
 					id name fusionWebUrl
@@ -78,7 +78,7 @@ func GetHubs(ctx context.Context, token string) ([]NavItem, error) {
 		}`
 	const qNext = `
 		query GetHubsNext($cursor: String!) {
-			hubs(pagination: { cursor: $cursor, limit: 100 }) {
+			hubs(pagination: { cursor: $cursor, limit: 50 }) {
 				pagination { cursor }
 				results {
 					id name fusionWebUrl
@@ -143,7 +143,7 @@ func GetHubs(ctx context.Context, token string) ([]NavItem, error) {
 func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetProjects($hubId: ID!) {
-			projects(hubId: $hubId, pagination: { limit: 100 }) {
+			projects(hubId: $hubId, pagination: { limit: 50 }) {
 				pagination { cursor }
 				results {
 					id name fusionWebUrl
@@ -153,7 +153,7 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 		}`
 	const qNext = `
 		query GetProjectsNext($hubId: ID!, $cursor: String!) {
-			projects(hubId: $hubId, pagination: { cursor: $cursor, limit: 100 }) {
+			projects(hubId: $hubId, pagination: { cursor: $cursor, limit: 50 }) {
 				pagination { cursor }
 				results {
 					id name fusionWebUrl
@@ -218,14 +218,14 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 func GetFolders(ctx context.Context, token, projectID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetFolders($projectId: ID!) {
-			foldersByProject(projectId: $projectId, pagination: { limit: 100 }) {
+			foldersByProject(projectId: $projectId, pagination: { limit: 50 }) {
 				pagination { cursor }
 				results { id name }
 			}
 		}`
 	const qNext = `
 		query GetFoldersNext($projectId: ID!, $cursor: String!) {
-			foldersByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 100 }) {
+			foldersByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 50 }) {
 				pagination { cursor }
 				results { id name }
 			}
@@ -276,14 +276,14 @@ func GetFolders(ctx context.Context, token, projectID string) ([]NavItem, error)
 func GetProjectItems(ctx context.Context, token, projectID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetProjectItems($projectId: ID!) {
-			itemsByProject(projectId: $projectId, pagination: { limit: 100 }) {
+			itemsByProject(projectId: $projectId, pagination: { limit: 50 }) {
 				pagination { cursor }
 				results { __typename id name }
 			}
 		}`
 	const qNext = `
 		query GetProjectItemsNext($projectId: ID!, $cursor: String!) {
-			itemsByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 100 }) {
+			itemsByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 50 }) {
 				pagination { cursor }
 				results { __typename id name }
 			}
@@ -335,14 +335,14 @@ func GetProjectItems(ctx context.Context, token, projectID string) ([]NavItem, e
 func GetItems(ctx context.Context, token, hubID, folderID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetItems($hubId: ID!, $folderId: ID!) {
-			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { limit: 100 }) {
+			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { limit: 50 }) {
 				pagination { cursor }
 				results { __typename id name }
 			}
 		}`
 	const qNext = `
 		query GetItemsNext($hubId: ID!, $folderId: ID!, $cursor: String!) {
-			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { cursor: $cursor, limit: 100 }) {
+			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { cursor: $cursor, limit: 50 }) {
 				pagination { cursor }
 				results { __typename id name }
 			}
