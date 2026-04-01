@@ -2,7 +2,7 @@
 
 A terminal browser for [Autodesk Platform Services (APS)](https://aps.autodesk.com) Manufacturing Data Model. Navigate your Fusion hubs, projects, folders, and designs from the command line.
 
-![FusionDataCLI screenshot](https://raw.githubusercontent.com/schneik80/FusionDataCLI/main/docs/screenshot.png)
+![FusionDataCLI screenshot](./docs/screenshot.png)
 
 ## Install
 
