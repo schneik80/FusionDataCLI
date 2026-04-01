@@ -14,6 +14,7 @@ type keyMap struct {
 	Refresh     key.Binding
 	Details     key.Binding
 	About       key.Binding
+	Theme       key.Binding
 	Debug       key.Binding
 	Quit        key.Binding
 }
@@ -62,6 +63,10 @@ var keys = keyMap{
 	About: key.NewBinding(
 		key.WithKeys("a"),
 		key.WithHelp("a", "about"),
+	),
+	Theme: key.NewBinding(
+		key.WithKeys("T"),
+		key.WithHelp("T", "cycle theme"),
 	),
 	Debug: key.NewBinding(
 		key.WithKeys("?"),
