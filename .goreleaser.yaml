@@ -46,7 +46,7 @@ brews:
       owner: schneik80
       name: homebrew-fusiondatacli
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    folder: Formula
+    directory: Formula
     homepage: "https://github.com/schneik80/FusionDataCLI"
     description: "Terminal browser for Autodesk Platform Services Manufacturing Data Model"
     license: "MIT"
