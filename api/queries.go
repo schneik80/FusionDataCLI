@@ -395,37 +395,10 @@ func GetItems(ctx context.Context, token, hubID, folderID string) ([]NavItem, er
 // a named type and returns formatted lines suitable for the debug log.
 // Useful for discovering undocumented filter fields (e.g. ProjectFilter).
 func IntrospectTypeFields(ctx context.Context, token, typeName string) ([]string, error) {
-	const q = `
-		query IntrospectType($name: String!) {
-			__type(name: $name) {
-				name
-				kind
-				inputFields {
-					name
-					description
-					type {
-						name
-						kind
-						ofType { name kind ofType { name kind } }
-					}
-				}
-				fields {
-					name
-					description
-					type {
-						name
-						kind
-						ofType { name kind ofType { name kind } }
-					}
-				}
-				enumValues {
-					name
-					description
-				}
-			}
-		}`
+	// Inline the type name — this API does not accept variables in introspection queries.
+	q := `{ __type(name: "` + typeName + `") { name kind inputFields { name description type { name kind ofType { name kind ofType { name kind } } } } fields { name description type { name kind ofType { name kind ofType { name kind } } } } enumValues { name description } } }`
 
-	data, err := gqlQuery(ctx, token, q, map[string]any{"name": typeName})
+	data, err := gqlQuery(ctx, token, q, nil)
 	if err != nil {
 		return nil, err
 	}
