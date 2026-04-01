@@ -10,7 +10,6 @@ type keyMap struct {
 	Enter       key.Binding
 	Open        key.Binding
 	OpenDesktop key.Binding
-	OpenViewer  key.Binding
 	Refresh     key.Binding
 	Details     key.Binding
 	About       key.Binding
@@ -47,10 +46,6 @@ var keys = keyMap{
 	OpenDesktop: key.NewBinding(
 		key.WithKeys("f"),
 		key.WithHelp("f", "open in Fusion"),
-	),
-	OpenViewer: key.NewBinding(
-		key.WithKeys("v"),
-		key.WithHelp("v", "view in browser"),
 	),
 	Refresh: key.NewBinding(
 		key.WithKeys("r"),

@@ -274,16 +274,6 @@ func openDesktopCmd(itemID, itemName, hubBaseURL string) tea.Cmd {
 	}
 }
 
-// openViewerCmd opens the web viewer for an item.
-// The viewer URL is derived from the overview URL by replacing "/overview/" with "/viewer/".
-func openViewerCmd(overviewURL string) tea.Cmd {
-	return func() tea.Msg {
-		viewerURL := strings.ReplaceAll(overviewURL, "/overview/", "/viewer/")
-		_ = auth.OpenBrowser(viewerURL)
-		return openedBrowserMsg{}
-	}
-}
-
 func openBrowserCmd(item api.NavItem, hubAltID, projectAltID string) tea.Cmd {
 	return func() tea.Msg {
 		u := itemWebURL(item, hubAltID, projectAltID)
@@ -457,9 +447,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.OpenDesktop):
 		return m.openInDesktop()
-
-	case key.Matches(msg, keys.OpenViewer):
-		return m.openInViewer()
 
 	case key.Matches(msg, keys.Refresh):
 		return m.refresh()
@@ -638,25 +625,6 @@ func (m Model) openInDesktop() (Model, tea.Cmd) {
 }
 
 // openInViewer opens the web viewer for the currently selected design item.
-// Uses the fusionWebUrl from the loaded details panel and replaces /overview/ with /viewer/.
-func (m Model) openInViewer() (Model, tea.Cmd) {
-	item := m.selectedItem(m.activeCol)
-	if item == nil || item.IsContainer {
-		return m, nil
-	}
-	webURL := ""
-	if m.details != nil && m.details.FusionWebURL != "" {
-		webURL = m.details.FusionWebURL
-	} else if m.selectedProjectWebURL != "" {
-		webURL = m.selectedProjectWebURL
-	}
-	if webURL == "" {
-		return m, nil
-	}
-	m.statusMsg = "Opening viewer…"
-	return m, openViewerCmd(webURL)
-}
-
 // refresh reloads the data for the active column.
 func (m Model) refresh() (Model, tea.Cmd) {
 	switch m.activeCol {
@@ -956,7 +924,7 @@ func (m Model) viewBrowser() string {
 
 	// Footer
 	footer := styleFooter.Width(m.width - 2).Render(
-		"[↑↓/jk] move  [←→/hl] navigate  [o] open  [f] Fusion  [v] viewer  [r] refresh  [t] theme  [a] about  [q] quit",
+		"[↑↓/jk] move  [←→/hl] navigate  [o] open  [f] Fusion  [r] refresh  [t] theme  [a] about  [q] quit",
 	)
 
 	return lipgloss.JoinVertical(lipgloss.Left,
