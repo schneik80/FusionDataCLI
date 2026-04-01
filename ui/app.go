@@ -956,7 +956,7 @@ func (m Model) viewBrowser() string {
 
 	// Footer
 	footer := styleFooter.Width(m.width - 2).Render(
-		"[↑↓/jk] move  [←→/hl] navigate  [o] open  [f] Fusion  [v] viewer  [r] refresh  [T] theme  [a] about  [q] quit",
+		"[↑↓/jk] move  [←→/hl] navigate  [o] open  [f] Fusion  [v] viewer  [r] refresh  [t] theme  [a] about  [q] quit",
 	)
 
 	return lipgloss.JoinVertical(lipgloss.Left,

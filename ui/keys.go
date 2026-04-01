@@ -65,8 +65,8 @@ var keys = keyMap{
 		key.WithHelp("a", "about"),
 	),
 	Theme: key.NewBinding(
-		key.WithKeys("T"),
-		key.WithHelp("T", "cycle theme"),
+		key.WithKeys("t"),
+		key.WithHelp("t", "cycle theme"),
 	),
 	Debug: key.NewBinding(
 		key.WithKeys("?"),
