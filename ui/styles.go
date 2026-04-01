@@ -41,7 +41,7 @@ var themes = []colorTheme{
 		// System — ANSI color tokens; inherits the terminal's own color scheme
 		// (same colors ls uses: blue for directories, bright-black for dim text)
 		name:      "System",
-		accent:    lipgloss.Color("4"),  // ANSI blue         — directories in ls
+		accent:    lipgloss.Color("6"),  // ANSI cyan         — high contrast accent
 		subtle:    lipgloss.Color("8"),  // ANSI bright-black — dim / inactive
 		muted:     lipgloss.Color("8"),  // ANSI bright-black
 		fg:        lipgloss.Color("7"),  // ANSI white        — normal foreground
