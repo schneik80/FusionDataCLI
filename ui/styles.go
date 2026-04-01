@@ -50,8 +50,8 @@ var themes = []colorTheme{
 		// System — ANSI color tokens; inherits the terminal's own color scheme
 		name:        "System",
 		accent:      lipgloss.Color("6"),  // ANSI cyan         — high contrast accent
-		subtle:      lipgloss.Color("8"),  // ANSI bright-black — dim / inactive
-		muted:       lipgloss.Color("8"),  // ANSI bright-black
+		subtle:      lipgloss.Color("5"),  // ANSI purple — borders / footer border
+		muted:       lipgloss.Color("5"),  // ANSI purple — footer text / dim
 		fg:          lipgloss.Color("7"),  // ANSI white        — normal foreground
 		errCol:      lipgloss.Color("1"),  // ANSI red
 		detailKey:   lipgloss.Color("6"),  // ANSI cyan         — high contrast label color
