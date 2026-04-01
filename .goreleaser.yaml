@@ -40,6 +40,23 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+brews:
+  - name: fusiondatacli
+    repository:
+      owner: schneik80
+      name: homebrew-fusiondatacli
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    folder: Formula
+    homepage: "https://github.com/schneik80/FusionDataCLI"
+    description: "Terminal browser for Autodesk Platform Services Manufacturing Data Model"
+    license: "MIT"
+    install: |
+      bin.install "fusiondatacli"
+    commit_author:
+      name: goreleaser
+      email: goreleaser@users.noreply.github.com
+    commit_msg_template: "chore: brew formula update for {{ .ProjectName }} {{ .Tag }}"
+
 changelog:
   sort: asc
   filters:
