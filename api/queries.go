@@ -6,22 +6,83 @@ import (
 	"fmt"
 )
 
-// pageLimit is the number of results requested per page.
-const pageLimit = 100
+// allPages calls the API repeatedly until no next-page cursor is returned.
+// queryFirst is used for the first call (no cursor argument in pagination).
+// queryNext is used for all subsequent calls ($cursor: String! is required).
+// vars is the base variables map (without cursor); it is copied each call.
+// extract receives the raw JSON data and returns the next cursor plus the
+// raw results slice to be appended by the caller.
+type pageResult struct {
+	cursor string
+	data   json.RawMessage
+}
 
-// GetHubs returns all hubs accessible to the authenticated user.
+func allPages(
+	ctx context.Context,
+	token string,
+	queryFirst, queryNext string,
+	baseVars map[string]any,
+	extract func(json.RawMessage) (pageResult, error),
+) ([]json.RawMessage, error) {
+	var pages []json.RawMessage
+	var cursor string
+	first := true
+
+	for {
+		vars := make(map[string]any, len(baseVars)+1)
+		for k, v := range baseVars {
+			vars[k] = v
+		}
+
+		var q string
+		if first {
+			q = queryFirst
+			first = false
+		} else {
+			q = queryNext
+			vars["cursor"] = cursor
+		}
+
+		data, err := gqlQuery(ctx, token, q, vars)
+		if err != nil {
+			return nil, err
+		}
+
+		pr, err := extract(data)
+		if err != nil {
+			return nil, err
+		}
+		pages = append(pages, pr.data)
+		cursor = pr.cursor
+		if cursor == "" {
+			break
+		}
+	}
+	return pages, nil
+}
+
+// ---------------------------------------------------------------------------
+// GetHubs
+// ---------------------------------------------------------------------------
+
 func GetHubs(ctx context.Context, token string) ([]NavItem, error) {
-	const q = `
-		query GetHubs($cursor: String) {
+	const qFirst = `
+		query GetHubs {
+			hubs(pagination: { limit: 100 }) {
+				pagination { cursor }
+				results {
+					id name fusionWebUrl
+					alternativeIdentifiers { dataManagementAPIHubId }
+				}
+			}
+		}`
+	const qNext = `
+		query GetHubsNext($cursor: String!) {
 			hubs(pagination: { cursor: $cursor, limit: 100 }) {
 				pagination { cursor }
 				results {
-					id
-					name
-					fusionWebUrl
-					alternativeIdentifiers {
-						dataManagementAPIHubId
-					}
+					id name fusionWebUrl
+					alternativeIdentifiers { dataManagementAPIHubId }
 				}
 			}
 		}`
@@ -35,31 +96,30 @@ func GetHubs(ctx context.Context, token string) ([]NavItem, error) {
 		} `json:"alternativeIdentifiers"`
 	}
 
-	var all []hubResult
-	var cursor string
-	for {
-		vars := map[string]any{}
-		if cursor != "" {
-			vars["cursor"] = cursor
-		}
-		data, err := gqlQuery(ctx, token, q, vars)
-		if err != nil {
-			return nil, err
-		}
-		var result struct {
+	pages, err := allPages(ctx, token, qFirst, qNext, nil, func(data json.RawMessage) (pageResult, error) {
+		var r struct {
 			Hubs struct {
 				Pagination struct{ Cursor string `json:"cursor"` } `json:"pagination"`
-				Results    []hubResult `json:"results"`
+				Results    []hubResult                             `json:"results"`
 			} `json:"hubs"`
 		}
-		if err := json.Unmarshal(data, &result); err != nil {
-			return nil, fmt.Errorf("hubs: %w", err)
+		if err := json.Unmarshal(data, &r); err != nil {
+			return pageResult{}, fmt.Errorf("hubs: %w", err)
 		}
-		all = append(all, result.Hubs.Results...)
-		cursor = result.Hubs.Pagination.Cursor
-		if cursor == "" {
-			break
+		raw, _ := json.Marshal(r.Hubs.Results)
+		return pageResult{cursor: r.Hubs.Pagination.Cursor, data: raw}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var all []hubResult
+	for _, p := range pages {
+		var batch []hubResult
+		if err := json.Unmarshal(p, &batch); err != nil {
+			return nil, err
 		}
+		all = append(all, batch...)
 	}
 
 	items := make([]NavItem, len(all))
@@ -76,19 +136,28 @@ func GetHubs(ctx context.Context, token string) ([]NavItem, error) {
 	return items, nil
 }
 
-// GetProjects returns all projects within a hub, fetching all pages.
+// ---------------------------------------------------------------------------
+// GetProjects
+// ---------------------------------------------------------------------------
+
 func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
-	const q = `
-		query GetProjects($hubId: ID!, $cursor: String) {
+	const qFirst = `
+		query GetProjects($hubId: ID!) {
+			projects(hubId: $hubId, pagination: { limit: 100 }) {
+				pagination { cursor }
+				results {
+					id name fusionWebUrl
+					alternativeIdentifiers { dataManagementAPIProjectId }
+				}
+			}
+		}`
+	const qNext = `
+		query GetProjectsNext($hubId: ID!, $cursor: String!) {
 			projects(hubId: $hubId, pagination: { cursor: $cursor, limit: 100 }) {
 				pagination { cursor }
 				results {
-					id
-					name
-					fusionWebUrl
-					alternativeIdentifiers {
-						dataManagementAPIProjectId
-					}
+					id name fusionWebUrl
+					alternativeIdentifiers { dataManagementAPIProjectId }
 				}
 			}
 		}`
@@ -102,31 +171,30 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 		} `json:"alternativeIdentifiers"`
 	}
 
-	var all []projectResult
-	var cursor string
-	for {
-		vars := map[string]any{"hubId": hubID}
-		if cursor != "" {
-			vars["cursor"] = cursor
-		}
-		data, err := gqlQuery(ctx, token, q, vars)
-		if err != nil {
-			return nil, err
-		}
-		var result struct {
+	pages, err := allPages(ctx, token, qFirst, qNext, map[string]any{"hubId": hubID}, func(data json.RawMessage) (pageResult, error) {
+		var r struct {
 			Projects struct {
 				Pagination struct{ Cursor string `json:"cursor"` } `json:"pagination"`
-				Results    []projectResult `json:"results"`
+				Results    []projectResult                         `json:"results"`
 			} `json:"projects"`
 		}
-		if err := json.Unmarshal(data, &result); err != nil {
-			return nil, fmt.Errorf("projects: %w", err)
+		if err := json.Unmarshal(data, &r); err != nil {
+			return pageResult{}, fmt.Errorf("projects: %w", err)
 		}
-		all = append(all, result.Projects.Results...)
-		cursor = result.Projects.Pagination.Cursor
-		if cursor == "" {
-			break
+		raw, _ := json.Marshal(r.Projects.Results)
+		return pageResult{cursor: r.Projects.Pagination.Cursor, data: raw}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var all []projectResult
+	for _, p := range pages {
+		var batch []projectResult
+		if err := json.Unmarshal(p, &batch); err != nil {
+			return nil, err
 		}
+		all = append(all, batch...)
 	}
 
 	items := make([]NavItem, len(all))
@@ -143,16 +211,23 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 	return items, nil
 }
 
-// GetFolders returns all root-level folders within a project, fetching all pages.
+// ---------------------------------------------------------------------------
+// GetFolders
+// ---------------------------------------------------------------------------
+
 func GetFolders(ctx context.Context, token, projectID string) ([]NavItem, error) {
-	const q = `
-		query GetFolders($projectId: ID!, $cursor: String) {
+	const qFirst = `
+		query GetFolders($projectId: ID!) {
+			foldersByProject(projectId: $projectId, pagination: { limit: 100 }) {
+				pagination { cursor }
+				results { id name }
+			}
+		}`
+	const qNext = `
+		query GetFoldersNext($projectId: ID!, $cursor: String!) {
 			foldersByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 100 }) {
 				pagination { cursor }
-				results {
-					id
-					name
-				}
+				results { id name }
 			}
 		}`
 
@@ -161,57 +236,56 @@ func GetFolders(ctx context.Context, token, projectID string) ([]NavItem, error)
 		Name string `json:"name"`
 	}
 
-	var all []folderResult
-	var cursor string
-	for {
-		vars := map[string]any{"projectId": projectID}
-		if cursor != "" {
-			vars["cursor"] = cursor
-		}
-		data, err := gqlQuery(ctx, token, q, vars)
-		if err != nil {
-			return nil, err
-		}
-		var result struct {
+	pages, err := allPages(ctx, token, qFirst, qNext, map[string]any{"projectId": projectID}, func(data json.RawMessage) (pageResult, error) {
+		var r struct {
 			FoldersByProject struct {
 				Pagination struct{ Cursor string `json:"cursor"` } `json:"pagination"`
-				Results    []folderResult `json:"results"`
+				Results    []folderResult                         `json:"results"`
 			} `json:"foldersByProject"`
 		}
-		if err := json.Unmarshal(data, &result); err != nil {
-			return nil, fmt.Errorf("folders: %w", err)
+		if err := json.Unmarshal(data, &r); err != nil {
+			return pageResult{}, fmt.Errorf("folders: %w", err)
 		}
-		all = append(all, result.FoldersByProject.Results...)
-		cursor = result.FoldersByProject.Pagination.Cursor
-		if cursor == "" {
-			break
+		raw, _ := json.Marshal(r.FoldersByProject.Results)
+		return pageResult{cursor: r.FoldersByProject.Pagination.Cursor, data: raw}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var all []folderResult
+	for _, p := range pages {
+		var batch []folderResult
+		if err := json.Unmarshal(p, &batch); err != nil {
+			return nil, err
 		}
+		all = append(all, batch...)
 	}
 
 	items := make([]NavItem, len(all))
 	for i, f := range all {
-		items[i] = NavItem{
-			ID:          f.ID,
-			Name:        f.Name,
-			Kind:        "folder",
-			IsContainer: true,
-		}
+		items[i] = NavItem{ID: f.ID, Name: f.Name, Kind: "folder", IsContainer: true}
 	}
 	return items, nil
 }
 
-// GetProjectItems returns all items at the root of a project, fetching all pages.
-// Used as a fallback when foldersByProject returns no folders (project has no sub-folders).
+// ---------------------------------------------------------------------------
+// GetProjectItems
+// ---------------------------------------------------------------------------
+
 func GetProjectItems(ctx context.Context, token, projectID string) ([]NavItem, error) {
-	const q = `
-		query GetProjectItems($projectId: ID!, $cursor: String) {
+	const qFirst = `
+		query GetProjectItems($projectId: ID!) {
+			itemsByProject(projectId: $projectId, pagination: { limit: 100 }) {
+				pagination { cursor }
+				results { __typename id name }
+			}
+		}`
+	const qNext = `
+		query GetProjectItemsNext($projectId: ID!, $cursor: String!) {
 			itemsByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 100 }) {
 				pagination { cursor }
-				results {
-					__typename
-					id
-					name
-				}
+				results { __typename id name }
 			}
 		}`
 
@@ -221,31 +295,30 @@ func GetProjectItems(ctx context.Context, token, projectID string) ([]NavItem, e
 		Name     string `json:"name"`
 	}
 
-	var all []itemResult
-	var cursor string
-	for {
-		vars := map[string]any{"projectId": projectID}
-		if cursor != "" {
-			vars["cursor"] = cursor
-		}
-		data, err := gqlQuery(ctx, token, q, vars)
-		if err != nil {
-			return nil, fmt.Errorf("project items: %w", err)
-		}
-		var result struct {
+	pages, err := allPages(ctx, token, qFirst, qNext, map[string]any{"projectId": projectID}, func(data json.RawMessage) (pageResult, error) {
+		var r struct {
 			ItemsByProject struct {
 				Pagination struct{ Cursor string `json:"cursor"` } `json:"pagination"`
-				Results    []itemResult `json:"results"`
+				Results    []itemResult                           `json:"results"`
 			} `json:"itemsByProject"`
 		}
-		if err := json.Unmarshal(data, &result); err != nil {
-			return nil, fmt.Errorf("project items decode: %w", err)
+		if err := json.Unmarshal(data, &r); err != nil {
+			return pageResult{}, fmt.Errorf("project items: %w", err)
 		}
-		all = append(all, result.ItemsByProject.Results...)
-		cursor = result.ItemsByProject.Pagination.Cursor
-		if cursor == "" {
-			break
+		raw, _ := json.Marshal(r.ItemsByProject.Results)
+		return pageResult{cursor: r.ItemsByProject.Pagination.Cursor, data: raw}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var all []itemResult
+	for _, p := range pages {
+		var batch []itemResult
+		if err := json.Unmarshal(p, &batch); err != nil {
+			return nil, err
 		}
+		all = append(all, batch...)
 	}
 
 	items := make([]NavItem, len(all))
@@ -255,17 +328,23 @@ func GetProjectItems(ctx context.Context, token, projectID string) ([]NavItem, e
 	return items, nil
 }
 
-// GetItems returns all items within a folder, fetching all pages.
+// ---------------------------------------------------------------------------
+// GetItems
+// ---------------------------------------------------------------------------
+
 func GetItems(ctx context.Context, token, hubID, folderID string) ([]NavItem, error) {
-	const q = `
-		query GetItems($hubId: ID!, $folderId: ID!, $cursor: String) {
+	const qFirst = `
+		query GetItems($hubId: ID!, $folderId: ID!) {
+			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { limit: 100 }) {
+				pagination { cursor }
+				results { __typename id name }
+			}
+		}`
+	const qNext = `
+		query GetItemsNext($hubId: ID!, $folderId: ID!, $cursor: String!) {
 			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { cursor: $cursor, limit: 100 }) {
 				pagination { cursor }
-				results {
-					__typename
-					id
-					name
-				}
+				results { __typename id name }
 			}
 		}`
 
@@ -275,31 +354,30 @@ func GetItems(ctx context.Context, token, hubID, folderID string) ([]NavItem, er
 		Name     string `json:"name"`
 	}
 
-	var all []itemResult
-	var cursor string
-	for {
-		vars := map[string]any{"hubId": hubID, "folderId": folderID}
-		if cursor != "" {
-			vars["cursor"] = cursor
-		}
-		data, err := gqlQuery(ctx, token, q, vars)
-		if err != nil {
-			return nil, err
-		}
-		var result struct {
+	pages, err := allPages(ctx, token, qFirst, qNext, map[string]any{"hubId": hubID, "folderId": folderID}, func(data json.RawMessage) (pageResult, error) {
+		var r struct {
 			ItemsByFolder struct {
 				Pagination struct{ Cursor string `json:"cursor"` } `json:"pagination"`
-				Results    []itemResult `json:"results"`
+				Results    []itemResult                          `json:"results"`
 			} `json:"itemsByFolder"`
 		}
-		if err := json.Unmarshal(data, &result); err != nil {
-			return nil, fmt.Errorf("items: %w", err)
+		if err := json.Unmarshal(data, &r); err != nil {
+			return pageResult{}, fmt.Errorf("items: %w", err)
 		}
-		all = append(all, result.ItemsByFolder.Results...)
-		cursor = result.ItemsByFolder.Pagination.Cursor
-		if cursor == "" {
-			break
+		raw, _ := json.Marshal(r.ItemsByFolder.Results)
+		return pageResult{cursor: r.ItemsByFolder.Pagination.Cursor, data: raw}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var all []itemResult
+	for _, p := range pages {
+		var batch []itemResult
+		if err := json.Unmarshal(p, &batch); err != nil {
+			return nil, err
 		}
+		all = append(all, batch...)
 	}
 
 	items := make([]NavItem, len(all))
@@ -309,7 +387,11 @@ func GetItems(ctx context.Context, token, hubID, folderID string) ([]NavItem, er
 	return items, nil
 }
 
-// navItemFromTypename maps a GraphQL __typename to a NavItem kind and IsContainer flag.
+// ---------------------------------------------------------------------------
+// GetItemDetails — single item lookup, no pagination needed
+// ---------------------------------------------------------------------------
+
+// navItemFromTypename maps a GraphQL __typename to a NavItem.
 func navItemFromTypename(id, name, typename string) NavItem {
 	kind := "unknown"
 	isContainer := false
