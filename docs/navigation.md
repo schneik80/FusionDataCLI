@@ -114,9 +114,22 @@ stateDiagram-v2
 | `f` | Open focused item in Fusion desktop (`fusion360://` deep link) |
 | `r` | Refresh current column |
 | `t` | Cycle color theme (Rust → Mono → System → Rust) |
+| `m` | Toggle mouse support on/off (default: on) |
 | `a` | Open About / License screen |
 | `?` | Open debug log overlay |
 | `q` `Ctrl+C` | Quit |
+
+### Mouse
+
+Mouse support is enabled by default and can be toggled with `m`. The footer bar reflects the current state (`mouse:on` / `mouse:off`).
+
+| Action | Behavior |
+|--------|----------|
+| Left click (Projects) | Select and navigate into project |
+| Left click (Contents - folder) | Select and drill into folder |
+| Left click (Contents - document) | Select and load details |
+| Scroll wheel | Move cursor up/down in active column |
+| Scroll wheel (overlays) | Scroll hub list, about, or debug views |
 
 ---
 
@@ -126,19 +139,21 @@ stateDiagram-v2
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ FusionDataCLI                                  Loading projects…          │
-├─────────────────┬──────────────────────┬───────────────────────────────  │
-│ Hubs            │ Projects             │ Contents                         │
-│ ──────────────  │ ──────────────────   │ ──────────────────────────────   │
-│ > ⬡ My Team    │ > ◈ Alpha            │ > ▸ Designs/                     │
-│   ⬡ Partner    │   ◈ Beta             │   ▸ Archive/                     │
-│                 │   ◈ Gamma            │     Assembly v2.f3d              │
-│                 │   ↓ more             │     Housing.f3d                  │
-│                 │                      │     ↓ more                       │
-├─────────────────┴──────────────────────┴───────────────────────────────  │
-│ [↑↓/jk] move  [←→/hl] navigate  [o] open  [f] Fusion  [r] refresh …    │
+│ FusionDataCLI  My Team › Alpha › Designs                                 │
+├──────────────────────┬──────────────────────┬────────────────────────────┤
+│ Projects             │ Contents             │ Details                    │
+│ ──────────────────   │ ──────────────────── │ ──────────────────────     │
+│ > ◈ Alpha            │ > ▸ Designs/         │ Assembly v2                │
+│   ◈ Beta             │   ▸ Archive/         │ Size      24.3 MB         │
+│   ◈ Gamma            │     Assembly v2.f3d  │ Version   v7              │
+│   ↓ more             │     Housing.f3d      │                           │
+│                      │     ↓ more           │                           │
+├──────────────────────┴──────────────────────┴────────────────────────────┤
+│ [↑↓/jk] move  [←→/l] navigate  [h] hubs  [o] open  [m] mouse:on  …    │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
+
+The breadcrumb bar at the top shows the current navigation path: Hub > Project > Folder(s) > Document.
 
 ### Four-column mode (details open with `d`)
 
@@ -202,7 +217,7 @@ flowchart LR
 
 ## Folder Stack
 
-Folder navigation uses an in-memory stack to allow arbitrary depth traversal:
+Folder navigation uses an in-memory stack of `breadcrumbEntry` structs (storing both ID and display name) to allow arbitrary depth traversal and breadcrumb display:
 
 ```mermaid
 sequenceDiagram

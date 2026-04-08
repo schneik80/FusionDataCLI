@@ -42,7 +42,7 @@ sudo mv fusiondatacli /usr/local/bin/
 fusiondatacli
 ```
 
-On first run the app opens your browser for Autodesk sign-in. After authenticating, navigate with the keyboard:
+On first run the app opens your browser for Autodesk sign-in. After authenticating, navigate with keyboard or mouse:
 
 | Key | Action |
 |-----|--------|
@@ -53,10 +53,19 @@ On first run the app opens your browser for Autodesk sign-in. After authenticati
 | `f` | Open in Fusion desktop |
 | `d` | Toggle details panel |
 | `t` | Cycle color theme |
+| `m` | Toggle mouse support on/off |
 | `a` | About / license |
 | `r` | Refresh |
 | `?` | Debug log |
 | `q` | Quit |
+
+### Mouse support
+
+Mouse support is enabled by default. Click items to select and navigate, use the scroll wheel to move through lists. Press `m` to toggle mouse on/off. The footer bar shows the current mouse state.
+
+### Breadcrumb bar
+
+The header displays a breadcrumb trail showing your current location in the hierarchy: Hub > Project > Folder(s) > Document.
 
 ### Non-US hubs
 

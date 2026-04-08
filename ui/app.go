@@ -59,6 +59,11 @@ type (
 // Model
 // ---------------------------------------------------------------------------
 
+type breadcrumbEntry struct {
+	id   string
+	name string
+}
+
 // Model is the root bubbletea model for the apsnav browser.
 type Model struct {
 	state    appState
@@ -99,8 +104,7 @@ type Model struct {
 	debugScroll int
 
 	// For column 2: when drilling into a subfolder, track the stack so we can go back.
-	// Each entry is the folder ID whose contents are currently shown.
-	folderStack []string
+	folderStack []breadcrumbEntry
 
 	// IDs and URLs of the currently selected hub and project.
 	selectedHubID         string
@@ -604,8 +608,8 @@ func (m Model) mouseClick(x, y int) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Y layout: header(1) + border-top(1) + title-row(1) = first item at y=3.
-	const firstItemY = 3
+	// Y layout: header(1) + border-top(1) + title-row(1) + padding = first item at y=4.
+	const firstItemY = 4
 	row := y - firstItemY
 
 	if col < 0 {
@@ -696,7 +700,7 @@ func (m Model) navigateLeft() (Model, tea.Cmd) {
 			m.loading[colContents] = true
 			if len(m.folderStack) > 0 {
 				// Reload the folder that's now on top of the stack.
-				return m, loadItemsCmd(m.token, m.selectedHubID, m.folderStack[len(m.folderStack)-1])
+				return m, loadItemsCmd(m.token, m.selectedHubID, m.folderStack[len(m.folderStack)-1].id)
 			}
 			// Back to project root folders.
 			proj := m.selectedItem(colProjects)
@@ -736,7 +740,7 @@ func (m Model) navigateRight() (Model, tea.Cmd) {
 		}
 		if item.IsContainer {
 			// Drill into sub-folder.
-			m.folderStack = append(m.folderStack, item.ID)
+			m.folderStack = append(m.folderStack, breadcrumbEntry{id: item.ID, name: item.Name})
 			m.cols[colContents] = nil
 			m.loading[colContents] = true
 			return m, loadItemsCmd(m.token, m.selectedHubID, item.ID)
@@ -805,10 +809,10 @@ func (m Model) refresh() (Model, tea.Cmd) {
 	case colContents:
 		if len(m.folderStack) > 0 {
 			// Reload current folder
-			folderID := m.folderStack[len(m.folderStack)-1]
+			entry := m.folderStack[len(m.folderStack)-1]
 			m.cols[colContents] = nil
 			m.loading[colContents] = true
-			return m, loadItemsCmd(m.token, m.selectedHubID, folderID)
+			return m, loadItemsCmd(m.token, m.selectedHubID, entry.id)
 		}
 		proj := m.selectedItem(colProjects)
 		if proj == nil {
@@ -1135,8 +1139,8 @@ func (m Model) viewError() string {
 }
 
 func (m Model) viewBrowser() string {
-	// Reserve rows: 1 header + 1 footer + 2 border = 4
-	const fixedRows = 4
+	// Reserve rows: 1 header + 2 footer (border+text) + 2 column border = 5
+	const fixedRows = 5
 	colHeight := m.height - fixedRows
 	if colHeight < 3 {
 		colHeight = 3
@@ -1159,22 +1163,34 @@ func (m Model) viewBrowser() string {
 	browserRow := lipgloss.JoinHorizontal(lipgloss.Top,
 		append(cols, detailsCol)...)
 
-	// Header — show selected hub name
-	hubName := ""
+	// Breadcrumb header: Hub › Project › Folder(s) › Document
+	var crumbs []string
 	for _, h := range m.hubs {
 		if h.ID == m.selectedHubID {
-			hubName = h.Name
+			crumbs = append(crumbs, h.Name)
 			break
 		}
 	}
-	status := ""
-	if hubName != "" {
-		status = styleStatus.Render(" — " + hubName)
+	if proj := m.selectedItem(colProjects); proj != nil {
+		crumbs = append(crumbs, proj.Name)
+	}
+	for _, f := range m.folderStack {
+		crumbs = append(crumbs, f.name)
+	}
+	if item := m.selectedItem(colContents); item != nil && !item.IsContainer {
+		crumbs = append(crumbs, item.Name)
+	}
+	breadcrumb := strings.Join(crumbs, " › ")
+	headerParts := "FusionDataCLI"
+	if breadcrumb != "" {
+		headerParts += "  " + breadcrumb
 	}
 	if m.statusMsg != "" {
-		status += styleStatus.Render("  " + m.statusMsg)
+		headerParts += "  " + m.statusMsg
 	}
-	header := styleHeader.Render("FusionDataCLI") + status
+	header := lipgloss.NewStyle().MaxWidth(m.width).Render(
+		styleHeader.Render(headerParts),
+	)
 
 	// Footer
 	mouseLabel := "[m] mouse:on"
