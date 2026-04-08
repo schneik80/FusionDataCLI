@@ -18,6 +18,7 @@ func main() {
 	p := tea.NewProgram(
 		ui.New(cfg, cfgErr, version),
 		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	)
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

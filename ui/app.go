@@ -109,7 +109,8 @@ type Model struct {
 	selectedProjectAltID  string
 	selectedProjectWebURL string // fusionWebUrl of the selected project, used as URL fallback
 
-	spinner spinner.Model
+	spinner      spinner.Model
+	mouseEnabled bool
 }
 
 // New creates the initial model. cfgErr may be non-nil when the config file is
@@ -127,10 +128,11 @@ func New(cfg *config.Config, cfgErr error, version string) Model {
 
 	if cfgErr != nil {
 		return Model{
-			state:   stateSetupNeeded,
-			err:     cfgErr,
-			spinner: sp,
-			version: version,
+			state:        stateSetupNeeded,
+			err:          cfgErr,
+			spinner:      sp,
+			version:      version,
+			mouseEnabled: true,
 		}
 	}
 
@@ -140,6 +142,7 @@ func New(cfg *config.Config, cfgErr error, version string) Model {
 		clientSecret: cfg.ClientSecret,
 		spinner:      sp,
 		version:      version,
+		mouseEnabled: true,
 	}
 }
 
@@ -374,6 +377,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateError
 		return m, nil
 
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -501,9 +507,158 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.spinner.Style = styleLoading
 		m.statusMsg = "Theme: " + name
 		return m, nil
+
+	case key.Matches(msg, keys.Mouse):
+		m.mouseEnabled = !m.mouseEnabled
+		if m.mouseEnabled {
+			m.statusMsg = "Mouse: on"
+			return m, tea.EnableMouseCellMotion
+		}
+		m.statusMsg = "Mouse: off"
+		return m, tea.DisableMouse
 	}
 
 	return m, nil
+}
+
+// handleMouse processes mouse events when mouse support is enabled.
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if !m.mouseEnabled {
+		return m, nil
+	}
+
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		return m.mouseScroll(-3)
+	case tea.MouseButtonWheelDown:
+		return m.mouseScroll(3)
+	case tea.MouseButtonLeft:
+		if msg.Action != tea.MouseActionPress {
+			return m, nil
+		}
+		return m.mouseClick(msg.X, msg.Y)
+	}
+	return m, nil
+}
+
+// mouseScroll handles scroll wheel events based on current state.
+func (m Model) mouseScroll(delta int) (tea.Model, tea.Cmd) {
+	switch m.state {
+	case stateBrowsing:
+		m.moveCursor(delta)
+		m.detailsScroll = 0
+		return m, m.maybeLoadDetails()
+	case stateHubSelect:
+		for range abs(delta) {
+			if delta < 0 && m.hubCursor > 0 {
+				m.hubCursor--
+			} else if delta > 0 && m.hubCursor < len(m.hubs)-1 {
+				m.hubCursor++
+			}
+		}
+		m.adjustHubScroll()
+		return m, nil
+	case stateAbout:
+		m.aboutScroll += delta
+		if m.aboutScroll < 0 {
+			m.aboutScroll = 0
+		}
+		return m, nil
+	case stateDebug:
+		m.debugScroll += delta
+		if m.debugScroll < 0 {
+			m.debugScroll = 0
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+// mouseClick handles left-click events in the browsing state.
+func (m Model) mouseClick(x, y int) (tea.Model, tea.Cmd) {
+	if m.state == stateHubSelect {
+		return m.mouseClickHub(y)
+	}
+	if m.state != stateBrowsing {
+		return m, nil
+	}
+
+	// Determine column layout (mirrors viewBrowser).
+	detailsWidth := (m.width * 35) / 100
+	navWidth := m.width - detailsWidth - 2
+	colWidth := (navWidth - 4) / numCols
+	if colWidth < 10 {
+		colWidth = 10
+	}
+
+	// Each column is rendered with style.Width(colWidth) which is the outer
+	// width (includes border + padding). Columns are placed side-by-side by
+	// lipgloss.JoinHorizontal.
+	col := -1
+	for i := 0; i < numCols; i++ {
+		colStart := i * colWidth
+		colEnd := colStart + colWidth
+		if x >= colStart && x < colEnd {
+			col = i
+			break
+		}
+	}
+
+	// Y layout: header(1) + border-top(1) + title-row(1) = first item at y=3.
+	const firstItemY = 3
+	row := y - firstItemY
+
+	if col < 0 {
+		return m, nil
+	}
+
+	row += m.scrolls[col]
+	items := m.cols[col]
+	if row < 0 || row >= len(items) {
+		return m, nil
+	}
+
+	if col != m.activeCol {
+		m.activeCol = col
+	}
+
+	m.cursors[col] = row
+	m.adjustScroll(col)
+	m.detailsScroll = 0
+
+	// For projects column or folders in contents, navigate into the item.
+	// For documents in contents, just load details.
+	item := m.cols[col][row]
+	if col == colProjects || item.IsContainer {
+		return m.navigateRight()
+	}
+	return m, m.maybeLoadDetails()
+}
+
+// mouseClickHub handles clicking on a hub in the hub selection overlay.
+func (m Model) mouseClickHub(y int) (tea.Model, tea.Cmd) {
+	// The hub overlay is centered; rows start after the overlay border + title.
+	// Approximate: the overlay header takes ~3 rows from top of overlay.
+	// Since exact positioning depends on centering, use a simpler approach:
+	// map y to hub index relative to scroll.
+	const overlayHeaderRows = 4 // border + title + blank + list start
+	centerY := (m.height - len(m.hubs) - overlayHeaderRows) / 2
+	if centerY < 0 {
+		centerY = 0
+	}
+	idx := y - centerY - overlayHeaderRows + m.hubScroll
+	if idx < 0 || idx >= len(m.hubs) {
+		return m, nil
+	}
+	m.hubCursor = idx
+	return m.selectHub()
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // moveCursor moves the cursor in the active column and adjusts scroll.
@@ -1022,9 +1177,19 @@ func (m Model) viewBrowser() string {
 	header := styleHeader.Render("FusionDataCLI") + status
 
 	// Footer
-	footer := styleFooter.Width(m.width - 2).Render(
-		"[↑↓/jk] move  [←→/l] navigate  [h] hubs  [o] open  [f] Fusion  [r] refresh  [t] theme  [a] about  [q] quit",
-	)
+	mouseLabel := "[m] mouse:on"
+	if !m.mouseEnabled {
+		mouseLabel = "[m] mouse:off"
+	}
+	helpText := "[↑↓/jk] move  [←→/l] navigate  [h] hubs  [o] open  [f] Fusion  [r] refresh  [t] theme  " + mouseLabel + "  [a] about  [q] quit"
+	// Right-align version by padding with spaces. Footer has border(1 top) + padding(0,1) so content width is width-4.
+	contentWidth := m.width - 4
+	gap := contentWidth - len(helpText) - len(m.version)
+	if gap < 2 {
+		gap = 2
+	}
+	footerLine := helpText + strings.Repeat(" ", gap) + m.version
+	footer := styleFooter.Width(m.width - 2).Render(footerLine)
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		header,

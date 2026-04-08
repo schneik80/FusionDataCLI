@@ -16,6 +16,7 @@ type keyMap struct {
 	About       key.Binding
 	Theme       key.Binding
 	Debug       key.Binding
+	Mouse       key.Binding
 	Quit        key.Binding
 }
 
@@ -71,6 +72,10 @@ var keys = keyMap{
 	Debug: key.NewBinding(
 		key.WithKeys("?"),
 		key.WithHelp("?", "debug log"),
+	),
+	Mouse: key.NewBinding(
+		key.WithKeys("m"),
+		key.WithHelp("m", "toggle mouse"),
 	),
 	Quit: key.NewBinding(
 		key.WithKeys("q", "ctrl+c"),
