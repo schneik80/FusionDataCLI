@@ -12,6 +12,7 @@ type keyMap struct {
 	OpenDesktop key.Binding
 	Refresh     key.Binding
 	Details     key.Binding
+	Hub         key.Binding
 	About       key.Binding
 	Theme       key.Binding
 	Debug       key.Binding
@@ -28,8 +29,8 @@ var keys = keyMap{
 		key.WithHelp("↓/j", "down"),
 	),
 	Left: key.NewBinding(
-		key.WithKeys("left", "h"),
-		key.WithHelp("←/h", "back"),
+		key.WithKeys("left"),
+		key.WithHelp("←", "back"),
 	),
 	Right: key.NewBinding(
 		key.WithKeys("right", "l"),
@@ -54,6 +55,10 @@ var keys = keyMap{
 	Details: key.NewBinding(
 		key.WithKeys("d"),
 		key.WithHelp("d", "details"),
+	),
+	Hub: key.NewBinding(
+		key.WithKeys("h"),
+		key.WithHelp("h", "switch hub"),
 	),
 	About: key.NewBinding(
 		key.WithKeys("a"),

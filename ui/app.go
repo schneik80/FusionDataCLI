@@ -27,18 +27,18 @@ const (
 	stateLoading                     // checking saved tokens
 	stateAuthNeeded                  // no token; prompt user to log in
 	stateAuthWaiting                 // browser opened; waiting for callback
-	stateBrowsing                    // main 3-column browser
+	stateBrowsing                    // main 2-column browser + details
+	stateHubSelect                   // hub selection overlay
 	stateAbout                       // about / license overlay
 	stateDebug                       // debug log overlay
 	stateError                       // unrecoverable error
 )
 
-// Column indices
+// Column indices (hubs are now an overlay, not a column)
 const (
-	colHubs     = 0
-	colProjects = 1
-	colContents = 2
-	numCols     = 3
+	colProjects = 0
+	colContents = 1
+	numCols     = 2
 )
 
 // ---------------------------------------------------------------------------
@@ -73,7 +73,13 @@ type Model struct {
 	clientID     string
 	clientSecret string
 
-	// Column data (hubs=0, projects=1, folders+items=2)
+	// Hub data (shown as overlay, not a column)
+	hubs       []api.NavItem
+	hubCursor  int
+	hubScroll  int
+	hubLoading bool
+
+	// Column data (projects=0, folders+items=1)
 	cols    [numCols][]api.NavItem
 	cursors [numCols]int
 	loading [numCols]bool
@@ -83,8 +89,7 @@ type Model struct {
 	// Which column has keyboard focus
 	activeCol int
 
-	// Details panel
-	detailsOpen    bool
+	// Details panel (always visible)
 	detailsLoading bool
 	details        *api.ItemDetails
 	detailsScroll  int
@@ -306,22 +311,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.token = msg.token
 		m.state = stateLoading
-		m.loading[colHubs] = true
+		m.hubLoading = true
 		return m, loadHubsCmd(m.token)
 
 	case hubsLoadedMsg:
-		m.loading[colHubs] = false
-		m.cols[colHubs] = msg.items
-		m.cursors[colHubs] = 0
-		m.scrolls[colHubs] = 0
-		m.state = stateBrowsing
-		// Auto-load projects if only one hub
+		m.hubLoading = false
+		m.hubs = msg.items
+		m.hubCursor = 0
+		m.hubScroll = 0
+		// Auto-select if only one hub, otherwise show hub overlay
 		if len(msg.items) == 1 {
+			m.state = stateBrowsing
 			m.activeCol = colProjects
+			m.selectedHubID = msg.items[0].ID
+			m.selectedHubAltID = msg.items[0].AltID
+			m.selectedHubWebURL = msg.items[0].WebURL
 			m.loading[colProjects] = true
 			return m, loadProjectsCmd(m.token, msg.items[0].ID)
 		}
-		m.activeCol = colHubs
+		m.state = stateHubSelect
+		m.activeCol = colProjects
 		return m, nil
 
 	case projectsLoadedMsg:
@@ -340,6 +349,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cols[colContents] = msg.items
 		m.cursors[colContents] = 0
 		m.scrolls[colContents] = 0
+		// Auto-load details for the first item
+		if len(msg.items) > 0 && !msg.items[0].IsContainer && m.selectedHubID != "" {
+			m.detailsLoading = true
+			m.details = nil
+			m.detailsScroll = 0
+			return m, loadDetailsCmd(m.token, m.selectedHubID, msg.items[0].ID)
+		}
+		m.details = nil
 		return m, nil
 
 	case detailsLoadedMsg:
@@ -393,6 +410,41 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state = stateBrowsing
 		return m, nil
 
+	case key.Matches(msg, keys.Hub):
+		if m.state == stateHubSelect {
+			m.state = stateBrowsing
+		} else if m.state == stateBrowsing {
+			m.hubScroll = 0
+			m.state = stateHubSelect
+		}
+		return m, nil
+
+	case m.state == stateHubSelect && key.Matches(msg, keys.Up):
+		if len(m.hubs) > 0 && m.hubCursor > 0 {
+			m.hubCursor--
+			m.adjustHubScroll()
+		}
+		return m, nil
+
+	case m.state == stateHubSelect && key.Matches(msg, keys.Down):
+		if len(m.hubs) > 0 && m.hubCursor < len(m.hubs)-1 {
+			m.hubCursor++
+			m.adjustHubScroll()
+		}
+		return m, nil
+
+	case m.state == stateHubSelect && (key.Matches(msg, keys.Enter) || key.Matches(msg, keys.Right)):
+		return m.selectHub()
+
+	case m.state == stateHubSelect && key.Matches(msg, keys.Refresh):
+		m.hubs = nil
+		m.hubLoading = true
+		return m, loadHubsCmd(m.token)
+
+	case m.state == stateHubSelect:
+		// ignore other keys in hub overlay
+		return m, nil
+
 	case key.Matches(msg, keys.Debug):
 		if m.state == stateDebug {
 			m.state = stateBrowsing
@@ -421,26 +473,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Up):
 		m.moveCursor(-1)
-		if m.detailsOpen {
-			m.detailsScroll = 0
-			return m, m.maybeLoadDetails()
-		}
+		m.detailsScroll = 0
+		return m, m.maybeLoadDetails()
 
 	case key.Matches(msg, keys.Down):
 		m.moveCursor(1)
-		if m.detailsOpen {
-			m.detailsScroll = 0
-			return m, m.maybeLoadDetails()
-		}
+		m.detailsScroll = 0
+		return m, m.maybeLoadDetails()
 
 	case key.Matches(msg, keys.Left):
 		return m.navigateLeft()
 
 	case key.Matches(msg, keys.Right), key.Matches(msg, keys.Enter):
 		return m.navigateRight()
-
-	case key.Matches(msg, keys.Details):
-		return m.toggleDetails()
 
 	case key.Matches(msg, keys.Open):
 		return m.openInBrowser()
@@ -489,7 +534,6 @@ func (m *Model) adjustScroll(col int) {
 func (m Model) navigateLeft() (Model, tea.Cmd) {
 	switch m.activeCol {
 	case colContents:
-		m.detailsOpen = false
 		if len(m.folderStack) > 0 {
 			// Pop folder stack and reload the parent's contents.
 			m.folderStack = m.folderStack[:len(m.folderStack)-1]
@@ -509,8 +553,6 @@ func (m Model) navigateLeft() (Model, tea.Cmd) {
 			m.activeCol = colProjects
 		}
 	case colProjects:
-		m.activeCol = colHubs
-	case colHubs:
 		// Already at leftmost column.
 	}
 	return m, nil
@@ -519,20 +561,6 @@ func (m Model) navigateLeft() (Model, tea.Cmd) {
 // navigateRight moves focus right, loading the next level.
 func (m Model) navigateRight() (Model, tea.Cmd) {
 	switch m.activeCol {
-	case colHubs:
-		item := m.selectedItem(colHubs)
-		if item == nil {
-			return m, nil
-		}
-		m.selectedHubID = item.ID
-		m.selectedHubAltID = item.AltID
-		m.selectedHubWebURL = item.WebURL
-		m.activeCol = colProjects
-		m.cols[colProjects] = nil
-		m.cols[colContents] = nil
-		m.loading[colProjects] = true
-		return m, loadProjectsCmd(m.token, item.ID)
-
 	case colProjects:
 		item := m.selectedItem(colProjects)
 		if item == nil {
@@ -551,41 +579,24 @@ func (m Model) navigateRight() (Model, tea.Cmd) {
 		if item == nil {
 			return m, nil
 		}
-		if !item.IsContainer {
-			// Open details panel for documents.
-			return m.toggleDetails()
+		if item.IsContainer {
+			// Drill into sub-folder.
+			m.folderStack = append(m.folderStack, item.ID)
+			m.cols[colContents] = nil
+			m.loading[colContents] = true
+			return m, loadItemsCmd(m.token, m.selectedHubID, item.ID)
 		}
-		// Drill into sub-folder.
-		m.folderStack = append(m.folderStack, item.ID)
-		m.cols[colContents] = nil
-		m.loading[colContents] = true
-		return m, loadItemsCmd(m.token, m.selectedHubID, item.ID)
+		// Non-container: details already visible, no-op for right arrow.
 	}
 	return m, nil
 }
 
-// toggleDetails opens or closes the details panel for the currently selected item.
-func (m Model) toggleDetails() (Model, tea.Cmd) {
-	if m.detailsOpen {
-		m.detailsOpen = false
-		return m, nil
-	}
+// maybeLoadDetails loads details for the current item if it's a document.
+func (m *Model) maybeLoadDetails() tea.Cmd {
 	item := m.selectedItem(m.activeCol)
 	if item == nil || item.IsContainer {
-		return m, nil
-	}
-	m.detailsOpen = true
-	m.details = nil
-	m.detailsLoading = true
-	m.detailsScroll = 0
-	return m, loadDetailsCmd(m.token, m.selectedHubID, item.ID)
-}
-
-// maybeLoadDetails reloads details for the current item if the panel is open.
-func (m Model) maybeLoadDetails() tea.Cmd {
-	item := m.selectedItem(m.activeCol)
-	if item == nil || item.IsContainer {
-		m.detailsOpen = false
+		m.details = nil
+		m.detailsLoading = false
 		return nil
 	}
 	m.detailsLoading = true
@@ -628,19 +639,13 @@ func (m Model) openInDesktop() (Model, tea.Cmd) {
 // refresh reloads the data for the active column.
 func (m Model) refresh() (Model, tea.Cmd) {
 	switch m.activeCol {
-	case colHubs:
-		m.cols[colHubs] = nil
-		m.loading[colHubs] = true
-		return m, loadHubsCmd(m.token)
-
 	case colProjects:
-		hub := m.selectedItem(colHubs)
-		if hub == nil {
+		if m.selectedHubID == "" {
 			return m, nil
 		}
 		m.cols[colProjects] = nil
 		m.loading[colProjects] = true
-		return m, loadProjectsCmd(m.token, hub.ID)
+		return m, loadProjectsCmd(m.token, m.selectedHubID)
 
 	case colContents:
 		if len(m.folderStack) > 0 {
@@ -659,6 +664,35 @@ func (m Model) refresh() (Model, tea.Cmd) {
 		return m, loadProjectContentsCmd(m.token, proj.ID)
 	}
 	return m, nil
+}
+
+// selectHub confirms the hub selection from the overlay and loads projects.
+func (m Model) selectHub() (Model, tea.Cmd) {
+	if len(m.hubs) == 0 {
+		return m, nil
+	}
+	hub := m.hubs[m.hubCursor]
+	m.selectedHubID = hub.ID
+	m.selectedHubAltID = hub.AltID
+	m.selectedHubWebURL = hub.WebURL
+	m.state = stateBrowsing
+	m.activeCol = colProjects
+	m.cols[colProjects] = nil
+	m.cols[colContents] = nil
+	m.loading[colProjects] = true
+	m.details = nil
+	m.folderStack = nil
+	return m, loadProjectsCmd(m.token, hub.ID)
+}
+
+// adjustHubScroll keeps the hub cursor visible in the overlay.
+func (m *Model) adjustHubScroll() {
+	visible := m.visibleRows()
+	if m.hubCursor < m.hubScroll {
+		m.hubScroll = m.hubCursor
+	} else if m.hubCursor >= m.hubScroll+visible {
+		m.hubScroll = m.hubCursor - visible + 1
+	}
 }
 
 // selectedItem returns a pointer to the item at the cursor in a given column, or nil.
@@ -689,6 +723,8 @@ func (m Model) View() string {
 		return m.viewAuthNeeded()
 	case stateAuthWaiting:
 		return m.viewLoading("Waiting for browser authentication…")
+	case stateHubSelect:
+		return m.viewHubSelect()
 	case stateAbout:
 		return m.viewAbout()
 	case stateDebug:
@@ -715,6 +751,73 @@ func (m Model) viewAuthNeeded() string {
 		styleItemNormal.Render("  Press [Enter] to open your browser and log in."),
 	)
 	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Center, body)
+}
+
+func (m Model) viewHubSelect() string {
+	header := styleHeader.Render("FusionDataCLI — Select Hub") +
+		styleStatus.Render("  [↑↓/jk] move  [Enter] select  [r] refresh  [h] close")
+
+	if m.hubLoading {
+		body := fmt.Sprintf("\n  %s %s\n", m.spinner.View(), styleLoading.Render("Loading hubs…"))
+		return lipgloss.JoinVertical(lipgloss.Left, header, body)
+	}
+
+	if len(m.hubs) == 0 {
+		body := styleItemDim.Render("\n  No hubs found.\n")
+		return lipgloss.JoinVertical(lipgloss.Left, header, body)
+	}
+
+	// Current selection indicator
+	current := ""
+	if m.selectedHubID != "" {
+		for _, h := range m.hubs {
+			if h.ID == m.selectedHubID {
+				current = styleItemDim.Render("  Current: " + h.Name)
+				break
+			}
+		}
+	}
+
+	visibleH := m.height - 5
+	if visibleH < 1 {
+		visibleH = 1
+	}
+	scroll := clamp(m.hubScroll, 0, max(0, len(m.hubs)-visibleH))
+	end := min(scroll+visibleH, len(m.hubs))
+
+	innerWidth := m.width - 8
+	if innerWidth < 20 {
+		innerWidth = 20
+	}
+
+	var sb strings.Builder
+	if current != "" {
+		sb.WriteString(current)
+		sb.WriteString("\n\n")
+	} else {
+		sb.WriteString("\n")
+	}
+	for i := scroll; i < end; i++ {
+		hub := m.hubs[i]
+		icon := kindIcon(hub.Kind)
+		label := truncate(icon+hub.Name, innerWidth)
+		if i == m.hubCursor {
+			sb.WriteString(styleItemSelected.Width(innerWidth).Render(label))
+		} else {
+			sb.WriteString(styleContainerItem.Width(innerWidth).Render(label))
+		}
+		if i < end-1 {
+			sb.WriteString("\n")
+		}
+	}
+	if scroll > 0 {
+		sb.WriteString("\n" + styleItemDim.Render("  ↑ more"))
+	}
+	if end < len(m.hubs) {
+		sb.WriteString("\n" + styleItemDim.Render("  ↓ more"))
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, sb.String())
 }
 
 func (m Model) viewSetupNeeded() string {
@@ -884,47 +987,43 @@ func (m Model) viewBrowser() string {
 		colHeight = 3
 	}
 
-	var browserRow string
-	if m.detailsOpen {
-		// 4-column layout: Hubs | Projects | Contents | Details
-		// Details gets ~40% of the width; the 3 nav columns split the rest.
-		detailsWidth := (m.width * 2) / 5
-		navWidth := m.width - detailsWidth - 2
-		colWidth := (navWidth - 6) / numCols
-		if colWidth < 8 {
-			colWidth = 8
-		}
-		cols := make([]string, numCols)
-		titles := []string{"Hubs", "Projects", "Contents"}
-		for i := 0; i < numCols; i++ {
-			cols[i] = m.renderColumn(i, titles[i], colWidth, colHeight)
-		}
-		detailsCol := m.viewDetailsColumn(detailsWidth, colHeight)
-		browserRow = lipgloss.JoinHorizontal(lipgloss.Top,
-			append(cols, detailsCol)...)
-	} else {
-		colWidth := (m.width - 6) / numCols
-		if colWidth < 10 {
-			colWidth = 10
-		}
-		cols := make([]string, numCols)
-		titles := []string{"Hubs", "Projects", "Contents"}
-		for i := 0; i < numCols; i++ {
-			cols[i] = m.renderColumn(i, titles[i], colWidth, colHeight)
-		}
-		browserRow = lipgloss.JoinHorizontal(lipgloss.Top, cols...)
+	// 3-panel layout: Projects | Contents | Details
+	// Details gets ~35% of the width; the 2 nav columns split the rest.
+	detailsWidth := (m.width * 35) / 100
+	navWidth := m.width - detailsWidth - 2
+	colWidth := (navWidth - 4) / numCols
+	if colWidth < 10 {
+		colWidth = 10
 	}
+	cols := make([]string, numCols)
+	titles := []string{"Projects", "Contents"}
+	for i := 0; i < numCols; i++ {
+		cols[i] = m.renderColumn(i, titles[i], colWidth, colHeight)
+	}
+	detailsCol := m.viewDetailsColumn(detailsWidth, colHeight)
+	browserRow := lipgloss.JoinHorizontal(lipgloss.Top,
+		append(cols, detailsCol)...)
 
-	// Header
+	// Header — show selected hub name
+	hubName := ""
+	for _, h := range m.hubs {
+		if h.ID == m.selectedHubID {
+			hubName = h.Name
+			break
+		}
+	}
 	status := ""
+	if hubName != "" {
+		status = styleStatus.Render(" — " + hubName)
+	}
 	if m.statusMsg != "" {
-		status = styleStatus.Render(" — " + m.statusMsg)
+		status += styleStatus.Render("  " + m.statusMsg)
 	}
 	header := styleHeader.Render("FusionDataCLI") + status
 
 	// Footer
 	footer := styleFooter.Width(m.width - 2).Render(
-		"[↑↓/jk] move  [←→/hl] navigate  [o] open  [f] Fusion  [r] refresh  [t] theme  [a] about  [q] quit",
+		"[↑↓/jk] move  [←→/l] navigate  [h] hubs  [o] open  [f] Fusion  [r] refresh  [t] theme  [a] about  [q] quit",
 	)
 
 	return lipgloss.JoinVertical(lipgloss.Left,
