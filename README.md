@@ -49,8 +49,7 @@ On first run the app opens your browser for Autodesk sign-in. After authenticati
 | `↑` `↓` / `j` `k` | Move cursor |
 | `→` `↵` / `l` | Enter folder / open details |
 | `←` / `h` | Go back |
-| `o` | Open in browser (requires autodesk.com sign-in — see `s`) |
-| `s` | Sign in to Autodesk in the default browser |
+| `o` | Open selected document in browser (only after details have loaded) |
 | `f` | Open in Fusion desktop (via Fusion MCP) |
 | `i` | Insert into active Fusion design (via Fusion MCP) |
 | `d` | Toggle details panel |
@@ -73,11 +72,13 @@ The header displays a breadcrumb trail showing your current location in the hier
 
 The `f` and `i` keys drive the running Fusion desktop client via its local MCP server (`http://127.0.0.1:27182/mcp`). `f` opens the selected document in a new Fusion window; `i` inserts it as an occurrence into the active design. Before sending the call, FusionDataCLI verifies that Fusion is on the same hub as the CLI (by matching the selected project against Fusion's active-hub project list) and refuses the call with a descriptive status message when the hubs differ.
 
-### Browser sign-in for `o`
+### Opening documents in the browser
 
-The `o` key opens the selected document in your default browser using the `fusionWebUrl` permalink returned by the APS Data Model API. That permalink is a deep link into the Autodesk web app and requires an active `accounts.autodesk.com` browser session. If you see an error page containing `BROWSER_LOGIN_REQUIRED` / `WEB SESSION INVALID` after pressing `o`, your browser isn't signed in.
+The `o` key opens the selected document in your default browser using the item-level `fusionWebUrl` permalink returned by the APS Manufacturing Data Model GraphQL API. This URL is loaded as part of the details panel, so `o` only fires **after** the details panel has finished loading for the selected item — the key hint `[o] web` appears at the bottom of the details panel while it's actionable. Pressing `o` on a container (project/folder) or before the details panel has loaded is a no-op with a status-bar hint.
 
-Press `s` to open `https://accounts.autodesk.com/logon` in your default browser and complete the sign-in. Once the browser holds an Autodesk session cookie, `o` works for the rest of that browser session. Pressing `o` also prints the exact URL being opened to the CLI's status bar so you can inspect or copy it.
+The earlier hand-constructed fallback URLs (`https://autodesk360.com/g/projects/...`, `https://acc.autodesk.com/docs/files/projects/...`) have been removed — those patterns are rejected by Autodesk's team web app with a raw JSON `BROWSER_LOGIN_REQUIRED` error on team hubs. Only the per-item permalink from the Data Model API is trusted now.
+
+The full URL passed to the OS browser handler is shown in the status bar so it can be inspected or copied.
 
 ### Non-US hubs
 

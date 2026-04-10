@@ -9,7 +9,6 @@ type keyMap struct {
 	Right       key.Binding
 	Enter       key.Binding
 	Open        key.Binding
-	SignIn      key.Binding
 	OpenDesktop key.Binding
 	Insert      key.Binding
 	Refresh     key.Binding
@@ -46,10 +45,6 @@ var keys = keyMap{
 	Open: key.NewBinding(
 		key.WithKeys("o"),
 		key.WithHelp("o", "open in browser"),
-	),
-	SignIn: key.NewBinding(
-		key.WithKeys("s"),
-		key.WithHelp("s", "sign in to Autodesk in browser"),
 	),
 	OpenDesktop: key.NewBinding(
 		key.WithKeys("f"),

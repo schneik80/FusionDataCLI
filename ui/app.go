@@ -118,11 +118,10 @@ type Model struct {
 	// For column 2: when drilling into a subfolder, track the stack so we can go back.
 	folderStack []breadcrumbEntry
 
-	// IDs and URLs of the currently selected hub and project.
-	selectedHubID         string
-	selectedHubAltID      string
-	selectedProjectAltID  string
-	selectedProjectWebURL string // fusionWebUrl of the selected project, used as URL fallback
+	// IDs of the currently selected hub and project.
+	selectedHubID        string
+	selectedHubAltID     string
+	selectedProjectAltID string
 
 	spinner      spinner.Model
 	mouseEnabled bool
@@ -354,15 +353,6 @@ func verifySameHub(ctx context.Context, client *fusion.Client, expectedProjectAl
 	return fmt.Errorf("Fusion is on a different hub — switch Fusion to %q and retry", hubLabel)
 }
 
-func openBrowserCmd(item api.NavItem, hubAltID, projectAltID string) tea.Cmd {
-	return func() tea.Msg {
-		u := itemWebURL(item, hubAltID, projectAltID)
-		api.DebugLog("OPEN_BROWSER %s", u)
-		_ = auth.OpenBrowser(u)
-		return openedBrowserMsg{url: u}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Update
 // ---------------------------------------------------------------------------
@@ -586,9 +576,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Open):
 		return m.openInBrowser()
-
-	case key.Matches(msg, keys.SignIn):
-		return m.openAutodeskSignIn()
 
 	case key.Matches(msg, keys.OpenDesktop):
 		return m.openInDesktop()
@@ -882,7 +869,6 @@ func (m Model) clickBreadcrumb(h crumbHit) (Model, tea.Cmd) {
 			return m, nil
 		}
 		m.selectedProjectAltID = proj.AltID
-		m.selectedProjectWebURL = proj.WebURL
 		m.activeCol = colContents
 		m.folderStack = nil
 		m.cols[colContents] = nil
@@ -946,7 +932,6 @@ func (m Model) navigateRight() (Model, tea.Cmd) {
 			return m, nil
 		}
 		m.selectedProjectAltID = item.AltID
-		m.selectedProjectWebURL = item.WebURL
 		m.activeCol = colContents
 		m.cols[colContents] = nil
 		m.folderStack = nil
@@ -982,43 +967,34 @@ func (m *Model) maybeLoadDetails() tea.Cmd {
 	return loadDetailsCmd(m.token, m.selectedHubID, item.ID)
 }
 
-// openInBrowser opens the selected item in the default browser.
-// Priority: details panel URL > item's own WebURL > project WebURL > constructed fallback.
+// openInBrowser opens the selected document's permalink in the default
+// browser. Only works once the details panel has loaded — that's the only
+// URL source we trust, because GraphQL's item-level fusionWebUrl is the
+// one the Autodesk web app actually honors. The project-level fallback URL
+// and the hand-constructed fallbacks used in earlier versions point at
+// routes that return "BROWSER_LOGIN_REQUIRED / WEB SESSION INVALID" for
+// team hubs, so they're intentionally gone.
+//
+// If the user presses `o` on a container (project/folder) or before
+// details have finished loading, the status bar tells them to wait for
+// the details panel and no browser call is made. The key hint is shown
+// at the bottom of the details panel so it only appears when `o` is in
+// fact actionable.
 func (m Model) openInBrowser() (Model, tea.Cmd) {
 	item := m.selectedItem(m.activeCol)
-	if item == nil {
+	if item == nil || item.IsContainer {
 		return m, nil
 	}
-	// For design/drawing items, prefer the permalink from the loaded details panel.
-	if !item.IsContainer && m.details != nil && m.details.FusionWebURL != "" {
-		m.statusMsg = "Opening…"
-		return m, openURLCmd(m.details.FusionWebURL)
-	}
-	// For items without a details URL, use the project's fusionWebUrl as a fallback.
-	if !item.IsContainer && m.selectedProjectWebURL != "" {
-		m.statusMsg = "Opening…"
-		return m, openURLCmd(m.selectedProjectWebURL)
+	if m.details == nil || m.details.FusionWebURL == "" {
+		if m.detailsLoading {
+			m.statusMsg = "Wait for details to load before pressing o"
+		} else {
+			m.statusMsg = "No web URL available for this item"
+		}
+		return m, nil
 	}
 	m.statusMsg = "Opening…"
-	return m, openBrowserCmd(*item, m.selectedHubAltID, m.selectedProjectAltID)
-}
-
-// autodeskSignInURL is the page that forces an SSO login flow against the
-// user's default browser. After signing in, the user's browser holds a
-// valid accounts.autodesk.com session cookie, which is what's required for
-// subsequent direct links like fusionWebUrl to render correctly instead of
-// returning a raw "WEB SESSION INVALID" JSON error.
-const autodeskSignInURL = "https://accounts.autodesk.com/logon"
-
-// openAutodeskSignIn opens the Autodesk SSO sign-in page in the user's
-// default browser. Use this when pressing `o` on a document returns
-// "BROWSER_LOGIN_REQUIRED / WEB SESSION INVALID" — that error means the
-// browser isn't signed in to accounts.autodesk.com. Pressing [s] completes
-// the sign-in, after which [o] works for the remainder of the browser
-// session.
-func (m Model) openAutodeskSignIn() (Model, tea.Cmd) {
-	m.statusMsg = "Opening Autodesk sign-in…"
-	return m, openURLCmd(autodeskSignInURL)
+	return m, openURLCmd(m.details.FusionWebURL)
 }
 
 // openInDesktop asks the running Fusion desktop client to open the selected
@@ -1445,7 +1421,6 @@ func (m Model) recoverFromError() (Model, tea.Cmd) {
 	m.selectedHubID = ""
 	m.selectedHubAltID = ""
 	m.selectedProjectAltID = ""
-	m.selectedProjectWebURL = ""
 	m.folderStack = nil
 	m.cols = [numCols][]api.NavItem{}
 	m.cursors = [numCols]int{}
@@ -1561,7 +1536,7 @@ func (m Model) viewBrowser() string {
 	if !m.mouseEnabled {
 		mouseLabel = "[m] mouse:off"
 	}
-	helpText := "[↑↓/jk] move  [←→/l] nav  [h] hubs  [o] open  [s] signin  [r] refresh  [t] theme  " + mouseLabel + "  [a] about  [q] quit"
+	helpText := "[↑↓/jk] move  [←→/l] nav  [h] hubs  [r] refresh  [t] theme  " + mouseLabel + "  [a] about  [q] quit"
 	// contentWidth is the writable area inside styleFooter's border+padding:
 	// border(none left/right) + padding(0,1) = 2 columns reserved. The border
 	// is drawn only on the top, so only horizontal padding consumes columns.
@@ -1743,7 +1718,7 @@ func (m Model) viewDetailsColumn(width, height int) string {
 			sb.WriteString("\n")
 		}
 		sb.WriteString("\n")
-		sb.WriteString(styleItemDim.Width(inner).Render("[f] open  [i] insert"))
+		sb.WriteString(styleItemDim.Width(inner).Render("[o] web  [f] open  [i] insert"))
 	}
 
 	return styleColumnInactive.Width(width).Height(height).Render(sb.String())
@@ -1919,57 +1894,9 @@ func truncate(s string, max int) string {
 	return string(runes[:max-1]) + "…"
 }
 
-// itemWebURL returns the best available web URL for an item.
-// If the API provided a direct URL on the item, that is used first.
-// Otherwise, falls back to constructing a URL from hub/project IDs.
-func itemWebURL(item api.NavItem, hubAltID, projectAltID string) string {
-	if item.WebURL != "" {
-		return item.WebURL
-	}
-	if strings.HasPrefix(hubAltID, "b.") {
-		return accURL(item, projectAltID)
-	}
-	return fusionURL(item, projectAltID)
-}
-
-// accURL returns the ACC web URL for an item.
-func accURL(item api.NavItem, projectAltID string) string {
-	const base = "https://acc.autodesk.com"
-	switch item.Kind {
-	case "hub":
-		return base + "/"
-	case "project":
-		if item.AltID != "" {
-			return base + "/docs/files/projects/" + item.AltID
-		}
-		return base + "/"
-	case "folder", "design", "configured":
-		if projectAltID != "" {
-			return base + "/docs/files/projects/" + projectAltID
-		}
-		return base + "/"
-	default:
-		return base + "/"
-	}
-}
-
-// fusionURL returns the Autodesk/Fusion web URL for a personal-hub item.
-func fusionURL(item api.NavItem, projectAltID string) string {
-	const base = "https://autodesk360.com"
-	switch item.Kind {
-	case "hub":
-		return base + "/"
-	case "project":
-		if item.AltID != "" {
-			return base + "/g/projects/" + item.AltID
-		}
-		return base + "/"
-	case "folder", "design", "configured":
-		if projectAltID != "" {
-			return base + "/g/projects/" + projectAltID
-		}
-		return base + "/"
-	default:
-		return base + "/"
-	}
-}
+// itemWebURL, accURL, and fusionURL used to hand-construct browser URLs
+// as fallbacks for openInBrowser. They pointed at "https://autodesk360.com"
+// and "https://acc.autodesk.com" with no hub subdomain, which Autodesk's
+// team web app rejects with a BROWSER_LOGIN_REQUIRED JSON error. Only the
+// per-item fusionWebUrl from GraphQL is trusted now; the fallbacks were
+// removed in v2.0.5.

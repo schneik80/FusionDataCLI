@@ -110,8 +110,7 @@ stateDiagram-v2
 | Key | Action |
 |-----|--------|
 | `d` | Toggle details panel (fourth column) |
-| `o` | Open focused item in system default browser (requires an autodesk.com browser session — press `s` first if needed) |
-| `s` | Open `accounts.autodesk.com/logon` in the default browser to establish a web session |
+| `o` | Open focused document permalink in system default browser (only after details panel has loaded; no-op on folders/projects or during loading) |
 | `f` | Open focused document in the running Fusion desktop client (via Fusion MCP server) |
 | `i` | Insert focused document as a new occurrence into the active Fusion design (via Fusion MCP server) |
 | `r` | Refresh current column |
@@ -252,37 +251,19 @@ sequenceDiagram
 
 ## Browser Open Logic
 
-When `o` is pressed, the URL is resolved in priority order:
+`o` is intentionally narrow: it only opens the per-item permalink from the APS Manufacturing Data Model GraphQL API's `DesignItem.fusionWebUrl` / `DrawingItem.fusionWebUrl` field, and only after the details panel has finished loading. The `[o] web` hint is pinned at the bottom of the details panel so the key appears actionable exactly when it is.
 
 ```mermaid
 flowchart TD
-    A{Details panel\nloaded?} -- Yes --> B[Use details.FusionWebURL]
-    A -- No --> C{Item has\nWebURL?}
-    C -- Yes --> D[Use item.WebURL]
-    C -- No --> E{Item is\nDesign/Drawing?}
-    E -- Yes --> F[Construct ACC URL\nhttps://acc.autodesk.com/…]
-    E -- No --> G{Project has\nWebURL?}
-    G -- Yes --> H[Use project.WebURL]
-    G -- No --> I[Construct Fusion360\nweb URL as fallback]
+    A{Non-container selected?} -- No --> Z[No-op]
+    A -- Yes --> B{Details loaded\nAND FusionWebURL present?}
+    B -- No --> W[No-op, status bar says\n"wait for details" or\n"no web URL available"]
+    B -- Yes --> C[Open details.FusionWebURL\nin system default browser]
 ```
 
-### Browser sign-in requirement
+Earlier versions tried to fall back to the project-level `fusionWebUrl` or to hand-constructed URLs like `https://autodesk360.com/g/projects/<id>` and `https://acc.autodesk.com/docs/files/projects/<id>`. Those patterns are rejected by Autodesk's team web app with a raw JSON `BROWSER_LOGIN_REQUIRED` / `WEB SESSION INVALID` error for team hubs, and they don't round-trip through the hub-subdomain routing that the real web app expects. They've been removed — the only trusted source is the item-level permalink.
 
-The URLs returned by `fusionWebUrl` and related fields are deep links into the Autodesk web app (`www.autodesk.com/fusion-team`, `acc.autodesk.com`, etc.). They render correctly only when the browser already holds a valid `accounts.autodesk.com` session cookie. Without a session, Autodesk's web app returns a raw JSON error body instead of redirecting to a login page:
-
-```json
-{
-  "errors": {
-    "error": {
-      "id": "BROWSER_LOGIN_REQUIRED",
-      "messageKey": "BROWSER_LOGIN_REQUIRED",
-      "message": "WEB SESSION INVALID"
-    }
-  }
-}
-```
-
-Press `s` to open `https://accounts.autodesk.com/logon` and complete the sign-in. Once the browser has an Autodesk session cookie, `o` works for the remainder of that browser session. The status bar prints the exact URL `o` opens, so the user can inspect it and retry manually if needed.
+The status bar prints the full URL as it's handed to the OS browser handler, and an `OPEN_BROWSER <url>` line is appended to the debug log (`APSNAV_DEBUG=1`) for inspection.
 
 ---
 
