@@ -64,3 +64,17 @@ func SaveTokens(td *TokenData) error {
 	}
 	return os.WriteFile(path, data, 0600)
 }
+
+// DeleteTokens removes any cached token file from disk. Used when the UI
+// needs to force a re-authentication (e.g. the server rejected the token).
+// Missing file is treated as success.
+func DeleteTokens() error {
+	path, err := tokensPath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}

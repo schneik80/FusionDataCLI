@@ -548,6 +548,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state = stateAuthWaiting
 		return m, tea.Batch(m.spinner.Tick, loginCmd(m.clientID, m.clientSecret))
 
+	case m.state == stateError && (key.Matches(msg, keys.Refresh) || key.Matches(msg, keys.Enter)):
+		return m.recoverFromError()
+
 	case m.state != stateBrowsing:
 		return m, nil
 
@@ -1367,8 +1370,59 @@ func (m Model) viewError() string {
 	if m.err != nil {
 		msg = m.err.Error()
 	}
-	content := styleError.Render("Error: " + msg + "\n\n[q] Quit")
+	hint := "[r] Retry   [q] Quit"
+	if isAuthError(m.err) {
+		hint = "[r] Sign in again   [q] Quit"
+	}
+	content := styleError.Render("Error: " + msg + "\n\n" + hint)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+}
+
+// isAuthError reports whether an error is almost certainly an expired or
+// invalid access token, so the error screen can steer the user toward
+// re-authenticating instead of a simple retry.
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unauthorized") ||
+		strings.Contains(msg, "token may be expired") ||
+		strings.Contains(msg, "401")
+}
+
+// recoverFromError resets the model from stateError back to the beginning of
+// the init flow. For auth errors it also deletes the on-disk token file so
+// the next checkTokensCmd call is guaranteed to prompt for a fresh login
+// instead of reusing a server-rejected token. For any other error it simply
+// re-runs the same init sequence the process would run on startup.
+func (m Model) recoverFromError() (Model, tea.Cmd) {
+	if isAuthError(m.err) {
+		_ = auth.DeleteTokens()
+	}
+	// Reset transient state so the UI comes back to a clean starting point.
+	m.err = nil
+	m.token = ""
+	m.hubs = nil
+	m.hubCursor = 0
+	m.hubScroll = 0
+	m.hubLoading = false
+	m.selectedHubID = ""
+	m.selectedHubAltID = ""
+	m.selectedProjectAltID = ""
+	m.selectedProjectWebURL = ""
+	m.folderStack = nil
+	m.cols = [numCols][]api.NavItem{}
+	m.cursors = [numCols]int{}
+	m.scrolls = [numCols]int{}
+	m.loading = [numCols]bool{}
+	m.activeCol = colProjects
+	m.details = nil
+	m.detailsLoading = false
+	m.detailsScroll = 0
+	m.statusMsg = ""
+	m.state = stateLoading
+	return m, tea.Batch(m.spinner.Tick, checkTokensCmd(m.clientID, m.clientSecret))
 }
 
 func (m Model) viewBrowser() string {
