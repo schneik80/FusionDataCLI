@@ -272,12 +272,19 @@ func openURLCmd(u string) tea.Cmd {
 }
 
 // openInFusionCmd asks the running Fusion desktop app (via its local MCP
-// server) to open the document identified by the lineage URN.
-func openInFusionCmd(fileID string) tea.Cmd {
+// server) to open the document identified by the lineage URN. Before sending
+// the open call, it verifies that Fusion's active hub contains the CLI's
+// currently-selected project; if not, it returns a message instructing the
+// user to switch hubs in Fusion and performs no action.
+func openInFusionCmd(fileID, expectedProjectAltID, expectedHubName string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		if err := fusion.NewClient().OpenDocument(ctx, fileID); err != nil {
+		client := fusion.NewClient()
+		if err := verifySameHub(ctx, client, expectedProjectAltID, expectedHubName); err != nil {
+			return fusionActionMsg{err: err}
+		}
+		if err := client.OpenDocument(ctx, fileID); err != nil {
 			return fusionActionMsg{err: err}
 		}
 		return fusionActionMsg{action: "Opened in Fusion"}
@@ -286,16 +293,48 @@ func openInFusionCmd(fileID string) tea.Cmd {
 
 // insertInFusionCmd asks the running Fusion desktop app (via its local MCP
 // server) to insert the document identified by the lineage URN as an
-// occurrence in the active design.
-func insertInFusionCmd(fileID string) tea.Cmd {
+// occurrence in the active design. Blocked if Fusion is on a different hub
+// (see openInFusionCmd).
+func insertInFusionCmd(fileID, expectedProjectAltID, expectedHubName string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		if err := fusion.NewClient().InsertDocument(ctx, fileID); err != nil {
+		client := fusion.NewClient()
+		if err := verifySameHub(ctx, client, expectedProjectAltID, expectedHubName); err != nil {
+			return fusionActionMsg{err: err}
+		}
+		if err := client.InsertDocument(ctx, fileID); err != nil {
 			return fusionActionMsg{err: err}
 		}
 		return fusionActionMsg{action: "Inserted in Fusion"}
 	}
+}
+
+// verifySameHub returns nil when Fusion's active hub contains a project with
+// the given Data Management API ID (the same format stored in
+// NavItem.AltID). Otherwise it returns an error whose message names the
+// expected hub so the status bar can tell the user to switch hubs in Fusion.
+//
+// An empty expectedProjectAltID (e.g. if the CLI is showing a personal hub
+// item where no project is selected) skips the check.
+func verifySameHub(ctx context.Context, client *fusion.Client, expectedProjectAltID, expectedHubName string) error {
+	if expectedProjectAltID == "" {
+		return nil
+	}
+	projects, err := client.ActiveHubProjects(ctx)
+	if err != nil {
+		return fmt.Errorf("could not verify Fusion hub: %w", err)
+	}
+	for _, p := range projects {
+		if p.ID == expectedProjectAltID {
+			return nil
+		}
+	}
+	hubLabel := expectedHubName
+	if hubLabel == "" {
+		hubLabel = "the selected hub"
+	}
+	return fmt.Errorf("Fusion is on a different hub — switch Fusion to %q and retry", hubLabel)
 }
 
 func openBrowserCmd(item api.NavItem, hubAltID, projectAltID string) tea.Cmd {
@@ -934,25 +973,39 @@ func (m Model) openInBrowser() (Model, tea.Cmd) {
 
 // openInDesktop asks the running Fusion desktop client to open the selected
 // document via its local MCP server. Requires Fusion to be running.
+// Blocks the call if Fusion's active hub differs from the CLI's selected hub.
 func (m Model) openInDesktop() (Model, tea.Cmd) {
 	item := m.selectedItem(m.activeCol)
 	if item == nil || item.IsContainer {
 		return m, nil
 	}
 	m.statusMsg = "Opening in Fusion…"
-	return m, openInFusionCmd(item.ID)
+	return m, openInFusionCmd(item.ID, m.selectedProjectAltID, m.selectedHubName())
 }
 
 // insertInDesktop asks the running Fusion desktop client to insert the
 // selected document as an occurrence in the currently active design, via its
 // local MCP server. Requires Fusion to be running with an active design.
+// Blocks the call if Fusion's active hub differs from the CLI's selected hub.
 func (m Model) insertInDesktop() (Model, tea.Cmd) {
 	item := m.selectedItem(m.activeCol)
 	if item == nil || item.IsContainer {
 		return m, nil
 	}
 	m.statusMsg = "Inserting in Fusion…"
-	return m, insertInFusionCmd(item.ID)
+	return m, insertInFusionCmd(item.ID, m.selectedProjectAltID, m.selectedHubName())
+}
+
+// selectedHubName returns the display name of the currently-selected hub,
+// or an empty string if nothing is selected. Used to build helpful error
+// messages when Fusion is on a different hub than the CLI.
+func (m Model) selectedHubName() string {
+	for _, h := range m.hubs {
+		if h.ID == m.selectedHubID {
+			return h.Name
+		}
+	}
+	return ""
 }
 
 // openInViewer opens the web viewer for the currently selected design item.

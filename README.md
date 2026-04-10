@@ -66,7 +66,11 @@ Mouse support is enabled by default. Click items to select and navigate, use the
 
 ### Breadcrumb bar
 
-The header displays a breadcrumb trail showing your current location in the hierarchy: Hub > Project > Folder(s) > Document.
+The header displays a breadcrumb trail showing your current location in the hierarchy: Hub > Project > Folder(s) > Document. Each segment is clickable — click the hub to open the hub-select overlay, click a project or folder to jump back to that level.
+
+### Fusion desktop integration
+
+The `f` and `i` keys drive the running Fusion desktop client via its local MCP server (`http://127.0.0.1:27182/mcp`). `f` opens the selected document in a new Fusion window; `i` inserts it as an occurrence into the active design. Before sending the call, FusionDataCLI verifies that Fusion is on the same hub as the CLI (by matching the selected project against Fusion's active-hub project list) and refuses the call with a descriptive status message when the hubs differ.
 
 ### Non-US hubs
 

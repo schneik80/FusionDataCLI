@@ -281,6 +281,21 @@ For `i`, the CLI calls `fusion_mcp_execute` with `featureType=script` and runs a
 
 Both operations require Fusion to be running locally with the MCP server enabled. If Fusion is not reachable or returns an error, the status bar shows the error message.
 
+### Hub Consistency Check
+
+Because FusionDataCLI and the running Fusion client can browse independent hubs, both `f` and `i` first verify that Fusion is on the same hub as the CLI before sending the open/insert call. The check works like this:
+
+1. Call `fusion_mcp_read` with `queryType=projects` — returns the projects in Fusion's currently active hub.
+2. Look up the currently-selected project's Data Management API ID (`NavItem.AltID`, e.g. `20250213876602531`) in the returned list.
+3. If the project is present, the hubs match; the open/insert call proceeds.
+4. If the project is missing, the open/insert call is **not** sent. The status bar displays:
+
+   ```
+   Fusion: Fusion is on a different hub — switch Fusion to "<hub name>" and retry
+   ```
+
+This prevents accidentally opening or inserting a file from one hub into a window that is showing content from another hub.
+
 ---
 
 ## Color Themes

@@ -70,6 +70,45 @@ func NewClient() *Client {
 	}
 }
 
+// HubProject is a single project returned by ActiveHubProjects. The ID is the
+// Data Management API project ID (the same format FusionDataCLI stores in
+// NavItem.AltID for projects), not the GraphQL project ID.
+type HubProject struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// ActiveHubProjects returns the projects in Fusion's currently active hub.
+// This does not require any document to be open — the MCP server routes the
+// request through app.data directly. Callers can use the returned project
+// IDs to verify that a separately-browsed hub matches Fusion's active hub.
+func (c *Client) ActiveHubProjects(ctx context.Context) ([]HubProject, error) {
+	sid, err := c.initSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tr, err := c.callTool(ctx, sid, "fusion_mcp_read", map[string]any{
+		"queryType": "projects",
+	})
+	if err != nil {
+		return nil, err
+	}
+	if tr == nil || len(tr.Content) == 0 {
+		return nil, errors.New("fusion MCP: empty projects response")
+	}
+	var payload struct {
+		Success  *bool        `json:"success"`
+		Projects []HubProject `json:"projects"`
+	}
+	if err := json.Unmarshal([]byte(tr.Content[0].Text), &payload); err != nil {
+		return nil, fmt.Errorf("fusion MCP: decoding projects: %w", err)
+	}
+	if payload.Success != nil && !*payload.Success {
+		return nil, errors.New("fusion MCP: projects query failed")
+	}
+	return payload.Projects, nil
+}
+
 // OpenDocument opens a Fusion document by its lineage URN (fileId).
 // Returns an error if the Fusion MCP server is unreachable or the document
 // cannot be opened.
