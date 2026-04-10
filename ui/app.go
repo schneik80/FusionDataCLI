@@ -1425,6 +1425,57 @@ func (m Model) recoverFromError() (Model, tea.Cmd) {
 	return m, tea.Batch(m.spinner.Tick, checkTokensCmd(m.clientID, m.clientSecret))
 }
 
+// fitFooterLine composes the footer text (help on the left, version right-
+// aligned) so that it fits on a single line of the given display width.
+// If the help text is too wide, it is truncated with a trailing ellipsis so
+// the version remains visible. If even the version can't fit, it is dropped.
+// Both inputs are measured with lipgloss.Width so multi-byte glyphs like
+// ↑↓←→ contribute 1 display column rather than their 3-byte UTF-8 length.
+func fitFooterLine(help, version string, width int) string {
+	const minGap = 2
+	verW := lipgloss.Width(version)
+	if width <= verW+minGap {
+		// No room for any help text — show just the version (or truncated).
+		return truncateDisplay(version, width)
+	}
+	maxHelpW := width - verW - minGap
+	helpW := lipgloss.Width(help)
+	if helpW > maxHelpW {
+		help = truncateDisplay(help, maxHelpW)
+		helpW = lipgloss.Width(help)
+	}
+	gap := width - helpW - verW
+	if gap < minGap {
+		gap = minGap
+	}
+	return help + strings.Repeat(" ", gap) + version
+}
+
+// truncateDisplay trims a string to fit in at most maxWidth display columns,
+// appending an ellipsis when the input was actually truncated. Uses
+// lipgloss.Width so multi-byte glyphs are counted correctly.
+func truncateDisplay(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= maxWidth {
+		return s
+	}
+	if maxWidth == 1 {
+		return "…"
+	}
+	runes := []rune(s)
+	// Binary-search-ish: trim runes until it fits with room for the ellipsis.
+	for len(runes) > 0 {
+		candidate := string(runes) + "…"
+		if lipgloss.Width(candidate) <= maxWidth {
+			return candidate
+		}
+		runes = runes[:len(runes)-1]
+	}
+	return "…"
+}
+
 func (m Model) viewBrowser() string {
 	// Reserve rows: 1 header + 2 footer (border+text) + 2 column border = 5
 	const fixedRows = 5
@@ -1465,19 +1516,25 @@ func (m Model) viewBrowser() string {
 		styleHeader.Render(headerParts),
 	)
 
-	// Footer
+	// Footer: help text on the left, version right-aligned. The help text
+	// MUST fit on a single line — if the footer wraps to a second row, the
+	// total vertical layout exceeds m.height and the header scrolls off
+	// the top of the terminal. We measure using lipgloss.Width (display
+	// width, not bytes — the glyphs like ↑↓←→ are multi-byte UTF-8) and
+	// truncate the help text with an ellipsis if needed.
 	mouseLabel := "[m] mouse:on"
 	if !m.mouseEnabled {
 		mouseLabel = "[m] mouse:off"
 	}
-	helpText := "[↑↓/jk] move  [←→/l] navigate  [h] hubs  [o] open  [r] refresh  [t] theme  " + mouseLabel + "  [a] about  [q] quit"
-	// Right-align version by padding with spaces. Footer has border(1 top) + padding(0,1) so content width is width-4.
-	contentWidth := m.width - 4
-	gap := contentWidth - len(helpText) - len(m.version)
-	if gap < 2 {
-		gap = 2
+	helpText := "[↑↓/jk] move  [←→/l] nav  [h] hubs  [o] open  [r] refresh  [t] theme  " + mouseLabel + "  [a] about  [q] quit"
+	// contentWidth is the writable area inside styleFooter's border+padding:
+	// border(none left/right) + padding(0,1) = 2 columns reserved. The border
+	// is drawn only on the top, so only horizontal padding consumes columns.
+	contentWidth := m.width - 2 - 2
+	if contentWidth < 1 {
+		contentWidth = 1
 	}
-	footerLine := helpText + strings.Repeat(" ", gap) + m.version
+	footerLine := fitFooterLine(helpText, m.version, contentWidth)
 	footer := styleFooter.Width(m.width - 2).Render(footerLine)
 
 	return lipgloss.JoinVertical(lipgloss.Left,
@@ -1651,7 +1708,7 @@ func (m Model) viewDetailsColumn(width, height int) string {
 			sb.WriteString("\n")
 		}
 		sb.WriteString("\n")
-		sb.WriteString(styleItemDim.Width(inner).Render("[f] open in Fusion  [i] insert"))
+		sb.WriteString(styleItemDim.Width(inner).Render("[f] open  [i] insert"))
 	}
 
 	return styleColumnInactive.Width(width).Height(height).Render(sb.String())
