@@ -276,12 +276,12 @@ func openURLCmd(u string) tea.Cmd {
 // the open call, it verifies that Fusion's active hub contains the CLI's
 // currently-selected project; if not, it returns a message instructing the
 // user to switch hubs in Fusion and performs no action.
-func openInFusionCmd(fileID, expectedProjectAltID, expectedHubName string) tea.Cmd {
+func openInFusionCmd(fileID, expectedProjectAltID, expectedProjectName, expectedHubName string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		client := fusion.NewClient()
-		if err := verifySameHub(ctx, client, expectedProjectAltID, expectedHubName); err != nil {
+		if err := verifySameHub(ctx, client, expectedProjectAltID, expectedProjectName, expectedHubName); err != nil {
 			return fusionActionMsg{err: err}
 		}
 		if err := client.OpenDocument(ctx, fileID); err != nil {
@@ -295,12 +295,12 @@ func openInFusionCmd(fileID, expectedProjectAltID, expectedHubName string) tea.C
 // server) to insert the document identified by the lineage URN as an
 // occurrence in the active design. Blocked if Fusion is on a different hub
 // (see openInFusionCmd).
-func insertInFusionCmd(fileID, expectedProjectAltID, expectedHubName string) tea.Cmd {
+func insertInFusionCmd(fileID, expectedProjectAltID, expectedProjectName, expectedHubName string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		client := fusion.NewClient()
-		if err := verifySameHub(ctx, client, expectedProjectAltID, expectedHubName); err != nil {
+		if err := verifySameHub(ctx, client, expectedProjectAltID, expectedProjectName, expectedHubName); err != nil {
 			return fusionActionMsg{err: err}
 		}
 		if err := client.InsertDocument(ctx, fileID); err != nil {
@@ -310,23 +310,35 @@ func insertInFusionCmd(fileID, expectedProjectAltID, expectedHubName string) tea
 	}
 }
 
-// verifySameHub returns nil when Fusion's active hub contains a project with
-// the given Data Management API ID (the same format stored in
-// NavItem.AltID). Otherwise it returns an error whose message names the
-// expected hub so the status bar can tell the user to switch hubs in Fusion.
+// verifySameHub returns nil when Fusion's active hub contains the CLI's
+// currently-selected project. Otherwise it returns an error whose message
+// names the expected hub so the status bar can tell the user to switch
+// hubs in Fusion.
 //
-// An empty expectedProjectAltID (e.g. if the CLI is showing a personal hub
-// item where no project is selected) skips the check.
-func verifySameHub(ctx context.Context, client *fusion.Client, expectedProjectAltID, expectedHubName string) error {
-	if expectedProjectAltID == "" {
+// The CLI stores a project's APS Data Management API ID (e.g.
+// "a.YnVzaW5lc3M6YXV0b2Rlc2s4MDgzIzIwMjUwMjEzODc2NjAyNTMx") but Fusion's
+// local MCP server reports the raw internal ID (e.g. "20250213876602531"),
+// so we convert with fusion.NormalizeProjectID before comparing.
+//
+// An empty expectedProjectAltID (e.g. if the CLI hasn't drilled into a
+// project yet) skips the check. If conversion fails, we fall back to a
+// case-insensitive match on the project name so we don't spuriously block
+// on an unexpected ID format.
+func verifySameHub(ctx context.Context, client *fusion.Client, expectedProjectAltID, expectedProjectName, expectedHubName string) error {
+	if expectedProjectAltID == "" && expectedProjectName == "" {
 		return nil
 	}
 	projects, err := client.ActiveHubProjects(ctx)
 	if err != nil {
 		return fmt.Errorf("could not verify Fusion hub: %w", err)
 	}
+	wantID := fusion.NormalizeProjectID(expectedProjectAltID)
+	wantName := strings.TrimSpace(strings.ToLower(expectedProjectName))
 	for _, p := range projects {
-		if p.ID == expectedProjectAltID {
+		if wantID != "" && p.ID == wantID {
+			return nil
+		}
+		if wantID == "" && wantName != "" && strings.TrimSpace(strings.ToLower(p.Name)) == wantName {
 			return nil
 		}
 	}
@@ -979,8 +991,12 @@ func (m Model) openInDesktop() (Model, tea.Cmd) {
 	if item == nil || item.IsContainer {
 		return m, nil
 	}
+	projName := ""
+	if proj := m.selectedItem(colProjects); proj != nil {
+		projName = proj.Name
+	}
 	m.statusMsg = "Opening in Fusion…"
-	return m, openInFusionCmd(item.ID, m.selectedProjectAltID, m.selectedHubName())
+	return m, openInFusionCmd(item.ID, m.selectedProjectAltID, projName, m.selectedHubName())
 }
 
 // insertInDesktop asks the running Fusion desktop client to insert the
@@ -992,8 +1008,12 @@ func (m Model) insertInDesktop() (Model, tea.Cmd) {
 	if item == nil || item.IsContainer {
 		return m, nil
 	}
+	projName := ""
+	if proj := m.selectedItem(colProjects); proj != nil {
+		projName = proj.Name
+	}
 	m.statusMsg = "Inserting in Fusion…"
-	return m, insertInFusionCmd(item.ID, m.selectedProjectAltID, m.selectedHubName())
+	return m, insertInFusionCmd(item.ID, m.selectedProjectAltID, projName, m.selectedHubName())
 }
 
 // selectedHubName returns the display name of the currently-selected hub,

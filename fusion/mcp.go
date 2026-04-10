@@ -10,6 +10,7 @@ package fusion
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,12 +71,47 @@ func NewClient() *Client {
 	}
 }
 
-// HubProject is a single project returned by ActiveHubProjects. The ID is the
-// Data Management API project ID (the same format FusionDataCLI stores in
-// NavItem.AltID for projects), not the GraphQL project ID.
+// HubProject is a single project returned by ActiveHubProjects. The ID is
+// the raw internal project ID used by the Fusion desktop client (e.g.
+// "20250213876602531" or "D20241002812932306"). This is NOT the same format
+// as the GraphQL dataManagementAPIProjectId stored by FusionDataCLI — use
+// NormalizeProjectID to convert between them.
 type HubProject struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+// NormalizeProjectID converts a Fusion Data Management API project ID
+// (as returned by the APS Manufacturing Data Model GraphQL API in
+// alternativeIdentifiers.dataManagementAPIProjectId) to the raw internal
+// project ID used by the Fusion desktop client's local MCP server.
+//
+// Input format:  "a.YnVzaW5lc3M6YXV0b2Rlc2s4MDgzIzIwMjUwMjEzODc2NjAyNTMx"
+// Decoded:       "business:autodesk8083#20250213876602531"
+// Returned:      "20250213876602531"
+//
+// Returns the empty string if the input isn't in the expected "a.<base64>"
+// form or the decoded payload lacks the "#<id>" suffix.
+func NormalizeProjectID(dmAPIProjectID string) string {
+	if !strings.HasPrefix(dmAPIProjectID, "a.") {
+		return ""
+	}
+	payload := dmAPIProjectID[2:]
+	// The base64 payload is URL-safe (per APS convention) and may be missing
+	// padding. Try URL-safe first, then standard base64 as a fallback.
+	decoded, err := base64.RawURLEncoding.DecodeString(payload)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(payload)
+		if err != nil {
+			return ""
+		}
+	}
+	s := string(decoded)
+	idx := strings.LastIndex(s, "#")
+	if idx < 0 || idx+1 >= len(s) {
+		return ""
+	}
+	return s[idx+1:]
 }
 
 // ActiveHubProjects returns the projects in Fusion's currently active hub.
