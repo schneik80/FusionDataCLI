@@ -50,7 +50,8 @@ On first run the app opens your browser for Autodesk sign-in. After authenticati
 | `→` `↵` / `l` | Enter folder / open details |
 | `←` / `h` | Go back |
 | `o` | Open in browser |
-| `f` | Open in Fusion desktop |
+| `f` | Open in Fusion desktop (via Fusion MCP) |
+| `i` | Insert into active Fusion design (via Fusion MCP) |
 | `d` | Toggle details panel |
 | `t` | Cycle color theme |
 | `m` | Toggle mouse support on/off |

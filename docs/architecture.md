@@ -20,7 +20,7 @@ C4Context
 
     System_Ext(browser, "System Default Browser", "Used once during first login to complete the OAuth consent page. Not required after token is cached.")
 
-    System_Ext(fusion, "Fusion Desktop", "Optional. Receives deep-link URI (fusion360://) to open a design directly in the app.")
+    System_Ext(fusion, "Fusion Desktop", "Optional. Provides a local MCP server (http://127.0.0.1:27182/mcp) used to open and insert documents in the running app.")
 
     SystemDb_Ext(fs, "Local Filesystem", "~/.config/fusiondatacli/ — stores config.json (client ID) and tokens.json (access + refresh tokens).")
 
@@ -29,7 +29,7 @@ C4Context
     Rel(app, aps_mfg, "GraphQL queries", "HTTPS POST")
     Rel(app, fs, "Reads config, reads/writes tokens")
     Rel(app, browser, "Opens auth URL on first login", "OS exec")
-    Rel(app, fusion, "Sends deep-link URI", "OS exec")
+    Rel(app, fusion, "JSON-RPC tool calls (open / insert document)", "HTTP")
     Rel(browser, aps_auth, "Redirects to localhost:7879/callback")
 ```
 

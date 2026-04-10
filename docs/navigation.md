@@ -111,7 +111,8 @@ stateDiagram-v2
 |-----|--------|
 | `d` | Toggle details panel (fourth column) |
 | `o` | Open focused item in system default browser |
-| `f` | Open focused item in Fusion desktop (`fusion360://` deep link) |
+| `f` | Open focused document in the running Fusion desktop client (via Fusion MCP server) |
+| `i` | Insert focused document as a new occurrence into the active Fusion design (via Fusion MCP server) |
 | `r` | Refresh current column |
 | `t` | Cycle color theme (Rust → Mono → System → Rust) |
 | `m` | Toggle mouse support on/off (default: on) |
@@ -266,20 +267,19 @@ flowchart TD
 
 ---
 
-## Fusion Desktop Deep Link
+## Fusion Desktop Integration
 
-The `f` key builds a `fusion360://` URI:
+The `f` (open) and `i` (insert) keys talk to the running Fusion desktop client via its local MCP (Model Context Protocol) server, expected at:
 
 ```
-fusion360://lineageUrn=<itemID>&hubUrl=<processedHubURL>&documentName=<itemName>
+http://127.0.0.1:27182/mcp
 ```
 
-Hub URL processing:
-1. Remove all spaces
-2. Strip trailing path components (slashes and suffix chars)
-3. Uppercase the result
+For `f`, the CLI calls the `fusion_mcp_execute` tool with `featureType=document`, `operation=open`, and the item's lineage URN as `fileId`. Fusion opens the document in a new window.
 
-The URI is then opened with the OS-native handler (`open` / `xdg-open` / `rundll32`), which hands off to the Fusion desktop application if installed.
+For `i`, the CLI calls `fusion_mcp_execute` with `featureType=script` and runs a short Python snippet that resolves the lineage URN via `app.data.findFileById(...)` and inserts it into the active design using `rootComponent.occurrences.addByInsert(...)`. Insert requires that a design document already be active in Fusion.
+
+Both operations require Fusion to be running locally with the MCP server enabled. If Fusion is not reachable or returns an error, the status bar shows the error message.
 
 ---
 

@@ -288,7 +288,7 @@ func main() {
 
 	// ── Footer ────────────────────────────────────────────────────────────
 	footer := styleFooter.Width(totalWidth - 2).Render(
-		"[↑↓/jk] move  [←→/hl] navigate  [o] open  [f] Fusion  [d] details  [t] theme  [a] about  [q] quit",
+		"[↑↓/jk] move  [←→/hl] navigate  [o] open  [d] details  [t] theme  [a] about  [q] quit",
 	)
 
 	// ── Compose ───────────────────────────────────────────────────────────

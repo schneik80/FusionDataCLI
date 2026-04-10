@@ -3,9 +3,9 @@ package ui
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -14,6 +14,7 @@ import (
 	"github.com/schneik80/FusionDataCLI/api"
 	"github.com/schneik80/FusionDataCLI/auth"
 	"github.com/schneik80/FusionDataCLI/config"
+	"github.com/schneik80/FusionDataCLI/fusion"
 )
 
 // ---------------------------------------------------------------------------
@@ -53,6 +54,13 @@ type (
 	detailsLoadedMsg   struct{ details *api.ItemDetails }
 	errMsg            struct{ err error }
 	openedBrowserMsg   struct{}
+	// fusionActionMsg is the result of an asynchronous open/insert call
+	// against the local Fusion MCP server. If err is non-nil, the status bar
+	// shows the error; otherwise it shows the action string.
+	fusionActionMsg struct {
+		action string
+		err    error
+	}
 )
 
 // ---------------------------------------------------------------------------
@@ -109,7 +117,6 @@ type Model struct {
 	// IDs and URLs of the currently selected hub and project.
 	selectedHubID         string
 	selectedHubAltID      string
-	selectedHubWebURL     string // fusionWebUrl of the selected hub, used for desktop links
 	selectedProjectAltID  string
 	selectedProjectWebURL string // fusionWebUrl of the selected project, used as URL fallback
 
@@ -264,25 +271,30 @@ func openURLCmd(u string) tea.Cmd {
 	}
 }
 
-// openDesktopCmd builds a fusion360:// deep-link and opens it in the OS handler,
-// which launches the Fusion desktop client and opens the document directly.
-// Mirrors the Python logic in the PowerTools-Share-Document add-in:
-//
-//	fusion360://lineageUrn=<encoded-id>&hubUrl=<encoded-hub-url>&documentName=<encoded-name>
-//
-// hubBaseURL is the hub's fusionWebUrl (e.g. "https://autodesk8083.autodesk360.com").
-// Per the Python add-in, spaces are removed, trailing chars matching the last 3 are
-// stripped, then the result is uppercased before URL-encoding.
-func openDesktopCmd(itemID, itemName, hubBaseURL string) tea.Cmd {
+// openInFusionCmd asks the running Fusion desktop app (via its local MCP
+// server) to open the document identified by the lineage URN.
+func openInFusionCmd(fileID string) tea.Cmd {
 	return func() tea.Msg {
-		stripped := strings.TrimRight(strings.ReplaceAll(hubBaseURL, " ", ""), hubBaseURL[max(0, len(hubBaseURL)-3):])
-		hubURLParam := strings.ToUpper(stripped)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := fusion.NewClient().OpenDocument(ctx, fileID); err != nil {
+			return fusionActionMsg{err: err}
+		}
+		return fusionActionMsg{action: "Opened in Fusion"}
+	}
+}
 
-		link := "fusion360://lineageUrn=" + url.QueryEscape(itemID) +
-			"&hubUrl=" + url.QueryEscape(hubURLParam) +
-			"&documentName=" + url.QueryEscape(itemName)
-		_ = auth.OpenBrowser(link)
-		return openedBrowserMsg{}
+// insertInFusionCmd asks the running Fusion desktop app (via its local MCP
+// server) to insert the document identified by the lineage URN as an
+// occurrence in the active design.
+func insertInFusionCmd(fileID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := fusion.NewClient().InsertDocument(ctx, fileID); err != nil {
+			return fusionActionMsg{err: err}
+		}
+		return fusionActionMsg{action: "Inserted in Fusion"}
 	}
 }
 
@@ -332,7 +344,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeCol = colProjects
 			m.selectedHubID = msg.items[0].ID
 			m.selectedHubAltID = msg.items[0].AltID
-			m.selectedHubWebURL = msg.items[0].WebURL
 			m.loading[colProjects] = true
 			return m, loadProjectsCmd(m.token, msg.items[0].ID)
 		}
@@ -374,6 +385,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case openedBrowserMsg:
 		m.statusMsg = "Opened in browser"
+		return m, nil
+
+	case fusionActionMsg:
+		if msg.err != nil {
+			m.statusMsg = "Fusion: " + msg.err.Error()
+		} else {
+			m.statusMsg = msg.action
+		}
 		return m, nil
 
 	case errMsg:
@@ -503,6 +522,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.OpenDesktop):
 		return m.openInDesktop()
 
+	case key.Matches(msg, keys.Insert):
+		return m.insertInDesktop()
+
 	case key.Matches(msg, keys.Refresh):
 		return m.refresh()
 
@@ -584,6 +606,20 @@ func (m Model) mouseClick(x, y int) (tea.Model, tea.Cmd) {
 		return m.mouseClickHub(y)
 	}
 	if m.state != stateBrowsing {
+		return m, nil
+	}
+
+	// Breadcrumb hit test: the header is on row 0. If the click lands on a
+	// clickable segment, jump to that level instead of falling through to
+	// the column-click logic.
+	if y == 0 {
+		if _, hits := m.buildBreadcrumb(breadcrumbXOffset()); len(hits) > 0 {
+			for _, h := range hits {
+				if x >= h.xStart && x < h.xEnd {
+					return m.clickBreadcrumb(h)
+				}
+			}
+		}
 		return m, nil
 	}
 
@@ -688,6 +724,119 @@ func (m *Model) adjustScroll(col int) {
 	}
 }
 
+// crumbHit describes one clickable segment of the breadcrumb bar.
+// xStart is inclusive, xEnd is exclusive, both measured in terminal columns
+// from the leftmost column of the window.
+type crumbHit struct {
+	xStart, xEnd int
+	kind         string // "hub" | "project" | "folder"
+	index        int    // folder stack index for "folder", unused otherwise
+}
+
+// breadcrumbXOffset returns the absolute x column at which the breadcrumb
+// segments begin inside the header row. It accounts for the left padding of
+// styleHeader plus the fixed "FusionDataCLI  " prefix.
+func breadcrumbXOffset() int {
+	// styleHeader.Padding(0, 1) contributes 1 leading column.
+	return 1 + lipgloss.Width("FusionDataCLI  ")
+}
+
+// buildBreadcrumb returns the plain-text breadcrumb string (with " › "
+// separators) and the list of clickable segment regions. xOffset is the
+// absolute x column of the first rune of the breadcrumb text.
+//
+// The terminal document (a non-container item on colContents) is included in
+// the text but is NOT clickable — clicking the currently shown document does
+// nothing useful beyond what's already on screen.
+func (m Model) buildBreadcrumb(xOffset int) (string, []crumbHit) {
+	const sep = " › "
+	sepW := lipgloss.Width(sep)
+
+	var sb strings.Builder
+	var hits []crumbHit
+	x := xOffset
+	first := true
+
+	addSeg := func(text, kind string, idx int, clickable bool) {
+		if text == "" {
+			return
+		}
+		if !first {
+			sb.WriteString(sep)
+			x += sepW
+		}
+		first = false
+		w := lipgloss.Width(text)
+		if clickable {
+			hits = append(hits, crumbHit{xStart: x, xEnd: x + w, kind: kind, index: idx})
+		}
+		sb.WriteString(text)
+		x += w
+	}
+
+	for _, h := range m.hubs {
+		if h.ID == m.selectedHubID {
+			addSeg(h.Name, "hub", 0, true)
+			break
+		}
+	}
+	if proj := m.selectedItem(colProjects); proj != nil {
+		addSeg(proj.Name, "project", 0, true)
+	}
+	for i, f := range m.folderStack {
+		addSeg(f.name, "folder", i, true)
+	}
+	if item := m.selectedItem(colContents); item != nil && !item.IsContainer {
+		addSeg(item.Name, "document", 0, false)
+	}
+	return sb.String(), hits
+}
+
+// clickBreadcrumb navigates to the level described by a breadcrumb hit.
+//
+//   - hub:     opens the hub-select overlay.
+//   - project: clears the folder stack and reloads the project's root.
+//   - folder:  truncates the folder stack to the clicked depth and reloads
+//     the contents of that folder.
+func (m Model) clickBreadcrumb(h crumbHit) (Model, tea.Cmd) {
+	switch h.kind {
+	case "hub":
+		m.hubScroll = 0
+		m.state = stateHubSelect
+		return m, nil
+
+	case "project":
+		proj := m.selectedItem(colProjects)
+		if proj == nil {
+			return m, nil
+		}
+		m.selectedProjectAltID = proj.AltID
+		m.selectedProjectWebURL = proj.WebURL
+		m.activeCol = colContents
+		m.folderStack = nil
+		m.cols[colContents] = nil
+		m.loading[colContents] = true
+		m.details = nil
+		m.detailsScroll = 0
+		return m, loadProjectContentsCmd(m.token, proj.ID)
+
+	case "folder":
+		if h.index < 0 || h.index >= len(m.folderStack) {
+			return m, nil
+		}
+		// Truncate to include only up to and including the clicked folder.
+		target := m.folderStack[h.index]
+		m.folderStack = m.folderStack[:h.index+1]
+		m.activeCol = colContents
+		m.cols[colContents] = nil
+		m.loading[colContents] = true
+		m.details = nil
+		m.detailsScroll = 0
+		return m, loadItemsCmd(m.token, m.selectedHubID, target.id)
+	}
+	return m, nil
+}
+
 // navigateLeft moves focus left or goes up a folder level, returning a reload
 // command when the folder stack is popped.
 func (m Model) navigateLeft() (Model, tea.Cmd) {
@@ -783,15 +932,27 @@ func (m Model) openInBrowser() (Model, tea.Cmd) {
 	return m, openBrowserCmd(*item, m.selectedHubAltID, m.selectedProjectAltID)
 }
 
-// openInDesktop launches the Fusion desktop client via the fusion360:// protocol.
-// Requires the details panel to have been loaded (for the item URL / ID).
+// openInDesktop asks the running Fusion desktop client to open the selected
+// document via its local MCP server. Requires Fusion to be running.
 func (m Model) openInDesktop() (Model, tea.Cmd) {
 	item := m.selectedItem(m.activeCol)
-	if item == nil || item.IsContainer || m.selectedHubWebURL == "" {
+	if item == nil || item.IsContainer {
 		return m, nil
 	}
 	m.statusMsg = "Opening in Fusion…"
-	return m, openDesktopCmd(item.ID, item.Name, m.selectedHubWebURL)
+	return m, openInFusionCmd(item.ID)
+}
+
+// insertInDesktop asks the running Fusion desktop client to insert the
+// selected document as an occurrence in the currently active design, via its
+// local MCP server. Requires Fusion to be running with an active design.
+func (m Model) insertInDesktop() (Model, tea.Cmd) {
+	item := m.selectedItem(m.activeCol)
+	if item == nil || item.IsContainer {
+		return m, nil
+	}
+	m.statusMsg = "Inserting in Fusion…"
+	return m, insertInFusionCmd(item.ID)
 }
 
 // openInViewer opens the web viewer for the currently selected design item.
@@ -833,7 +994,6 @@ func (m Model) selectHub() (Model, tea.Cmd) {
 	hub := m.hubs[m.hubCursor]
 	m.selectedHubID = hub.ID
 	m.selectedHubAltID = hub.AltID
-	m.selectedHubWebURL = hub.WebURL
 	m.state = stateBrowsing
 	m.activeCol = colProjects
 	m.cols[colProjects] = nil
@@ -1164,23 +1324,9 @@ func (m Model) viewBrowser() string {
 		append(cols, detailsCol)...)
 
 	// Breadcrumb header: Hub › Project › Folder(s) › Document
-	var crumbs []string
-	for _, h := range m.hubs {
-		if h.ID == m.selectedHubID {
-			crumbs = append(crumbs, h.Name)
-			break
-		}
-	}
-	if proj := m.selectedItem(colProjects); proj != nil {
-		crumbs = append(crumbs, proj.Name)
-	}
-	for _, f := range m.folderStack {
-		crumbs = append(crumbs, f.name)
-	}
-	if item := m.selectedItem(colContents); item != nil && !item.IsContainer {
-		crumbs = append(crumbs, item.Name)
-	}
-	breadcrumb := strings.Join(crumbs, " › ")
+	// The crumbs are built with buildBreadcrumb so the same logic drives
+	// both the rendered string and the mouse hit-test regions.
+	breadcrumb, _ := m.buildBreadcrumb(breadcrumbXOffset())
 	headerParts := "FusionDataCLI"
 	if breadcrumb != "" {
 		headerParts += "  " + breadcrumb
@@ -1197,7 +1343,7 @@ func (m Model) viewBrowser() string {
 	if !m.mouseEnabled {
 		mouseLabel = "[m] mouse:off"
 	}
-	helpText := "[↑↓/jk] move  [←→/l] navigate  [h] hubs  [o] open  [f] Fusion  [r] refresh  [t] theme  " + mouseLabel + "  [a] about  [q] quit"
+	helpText := "[↑↓/jk] move  [←→/l] navigate  [h] hubs  [o] open  [r] refresh  [t] theme  " + mouseLabel + "  [a] about  [q] quit"
 	// Right-align version by padding with spaces. Footer has border(1 top) + padding(0,1) so content width is width-4.
 	contentWidth := m.width - 4
 	gap := contentWidth - len(helpText) - len(m.version)
@@ -1316,32 +1462,69 @@ func (m Model) viewDetailsColumn(width, height int) string {
 	sb.WriteString(styleColumnTitle.Width(inner).Render("Details"))
 	sb.WriteString("\n")
 
+	// A document is "actionable" in Fusion when the details panel is
+	// populated for a non-container item. When true, we pin hint text for
+	// the [f] open / [i] insert commands at the bottom of the panel so the
+	// user knows these commands target this document.
+	showFusionHints := !m.detailsLoading && m.details != nil
+	hintReserved := 0
+	if showFusionHints {
+		hintReserved = 2 // blank separator + hint line
+	}
+
+	// Total lines available inside the column body (after title + borders).
+	bodyH := height - 3
+	if bodyH < 1 {
+		bodyH = 1
+	}
+	// Space for scrollable details content, excluding reserved hint rows.
+	visibleH := bodyH - hintReserved
+	if visibleH < 1 {
+		visibleH = 1
+	}
+
+	usedLines := 0
 	if m.detailsLoading {
 		sb.WriteString(m.spinner.View())
 		sb.WriteString(styleLoading.Render(" Loading…"))
+		usedLines = 1
 	} else if m.details == nil {
 		sb.WriteString(styleItemDim.Width(inner).Render("No item selected"))
+		usedLines = 1
 	} else {
 		d := m.details
 		lines := buildDetailLines(d, inner)
-
-		visibleH := height - 3
-		if visibleH < 1 {
-			visibleH = 1
-		}
 		scroll := clamp(m.detailsScroll, 0, max(0, len(lines)-visibleH))
 		end := min(scroll+visibleH, len(lines))
 
-		for _, l := range lines[scroll:end] {
+		for i, l := range lines[scroll:end] {
 			sb.WriteString(l)
-			sb.WriteString("\n")
+			if i < end-scroll-1 {
+				sb.WriteString("\n")
+			}
+			usedLines++
 		}
 		if scroll > 0 {
-			sb.WriteString(styleItemDim.Render("  ↑ more"))
+			sb.WriteString("\n" + styleItemDim.Render("  ↑ more"))
+			usedLines++
 		}
 		if end < len(lines) {
 			sb.WriteString("\n" + styleItemDim.Render("  ↓ more"))
+			usedLines++
 		}
+	}
+
+	if showFusionHints {
+		// Pad with blank lines so the hint pins to the bottom of the panel.
+		pad := visibleH - usedLines
+		if pad < 0 {
+			pad = 0
+		}
+		for i := 0; i < pad; i++ {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+		sb.WriteString(styleItemDim.Width(inner).Render("[f] open in Fusion  [i] insert"))
 	}
 
 	return styleColumnInactive.Width(width).Height(height).Render(sb.String())
