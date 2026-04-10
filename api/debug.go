@@ -49,3 +49,11 @@ func dbgLog(format string, args ...any) {
 		dbgLines = dbgLines[len(dbgLines)-maxDebugLines:]
 	}
 }
+
+// DebugLog appends a formatted line to the shared debug log. Intended for
+// use by other packages (e.g. the ui layer) so that externally-initiated
+// events like "browser opened with URL X" are captured alongside the
+// request/response entries emitted by this package.
+func DebugLog(format string, args ...any) {
+	dbgLog(format, args...)
+}

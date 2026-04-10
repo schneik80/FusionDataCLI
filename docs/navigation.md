@@ -110,7 +110,8 @@ stateDiagram-v2
 | Key | Action |
 |-----|--------|
 | `d` | Toggle details panel (fourth column) |
-| `o` | Open focused item in system default browser |
+| `o` | Open focused item in system default browser (requires an autodesk.com browser session — press `s` first if needed) |
+| `s` | Open `accounts.autodesk.com/logon` in the default browser to establish a web session |
 | `f` | Open focused document in the running Fusion desktop client (via Fusion MCP server) |
 | `i` | Insert focused document as a new occurrence into the active Fusion design (via Fusion MCP server) |
 | `r` | Refresh current column |
@@ -264,6 +265,24 @@ flowchart TD
     G -- Yes --> H[Use project.WebURL]
     G -- No --> I[Construct Fusion360\nweb URL as fallback]
 ```
+
+### Browser sign-in requirement
+
+The URLs returned by `fusionWebUrl` and related fields are deep links into the Autodesk web app (`www.autodesk.com/fusion-team`, `acc.autodesk.com`, etc.). They render correctly only when the browser already holds a valid `accounts.autodesk.com` session cookie. Without a session, Autodesk's web app returns a raw JSON error body instead of redirecting to a login page:
+
+```json
+{
+  "errors": {
+    "error": {
+      "id": "BROWSER_LOGIN_REQUIRED",
+      "messageKey": "BROWSER_LOGIN_REQUIRED",
+      "message": "WEB SESSION INVALID"
+    }
+  }
+}
+```
+
+Press `s` to open `https://accounts.autodesk.com/logon` and complete the sign-in. Once the browser has an Autodesk session cookie, `o` works for the remainder of that browser session. The status bar prints the exact URL `o` opens, so the user can inspect it and retry manually if needed.
 
 ---
 

@@ -53,7 +53,11 @@ type (
 	contentsLoadedMsg  struct{ items []api.NavItem }
 	detailsLoadedMsg   struct{ details *api.ItemDetails }
 	errMsg            struct{ err error }
-	openedBrowserMsg   struct{}
+	// openedBrowserMsg reports the URL that was handed to the OS browser
+	// handler so the status bar can display it (useful when the target
+	// page errors out — e.g. Autodesk's "WEB SESSION INVALID" response —
+	// so the user can see the exact URL and copy it manually).
+	openedBrowserMsg   struct{ url string }
 	// fusionActionMsg is the result of an asynchronous open/insert call
 	// against the local Fusion MCP server. If err is non-nil, the status bar
 	// shows the error; otherwise it shows the action string.
@@ -266,8 +270,9 @@ func loadDetailsCmd(token, hubID, itemID string) tea.Cmd {
 
 func openURLCmd(u string) tea.Cmd {
 	return func() tea.Msg {
+		api.DebugLog("OPEN_BROWSER %s", u)
 		_ = auth.OpenBrowser(u)
-		return openedBrowserMsg{}
+		return openedBrowserMsg{url: u}
 	}
 }
 
@@ -352,8 +357,9 @@ func verifySameHub(ctx context.Context, client *fusion.Client, expectedProjectAl
 func openBrowserCmd(item api.NavItem, hubAltID, projectAltID string) tea.Cmd {
 	return func() tea.Msg {
 		u := itemWebURL(item, hubAltID, projectAltID)
+		api.DebugLog("OPEN_BROWSER %s", u)
 		_ = auth.OpenBrowser(u)
-		return openedBrowserMsg{}
+		return openedBrowserMsg{url: u}
 	}
 }
 
@@ -435,7 +441,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case openedBrowserMsg:
-		m.statusMsg = "Opened in browser"
+		// Show the URL in the status bar so users can see exactly what
+		// was opened. If the browser page errors (e.g. Autodesk returns
+		// "WEB SESSION INVALID") the user can then confirm the URL, sign
+		// in to accounts.autodesk.com in their browser, and retry.
+		if msg.url != "" {
+			m.statusMsg = "Opened: " + msg.url
+		} else {
+			m.statusMsg = "Opened in browser"
+		}
 		return m, nil
 
 	case fusionActionMsg:
@@ -572,6 +586,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Open):
 		return m.openInBrowser()
+
+	case key.Matches(msg, keys.SignIn):
+		return m.openAutodeskSignIn()
 
 	case key.Matches(msg, keys.OpenDesktop):
 		return m.openInDesktop()
@@ -984,6 +1001,24 @@ func (m Model) openInBrowser() (Model, tea.Cmd) {
 	}
 	m.statusMsg = "Opening…"
 	return m, openBrowserCmd(*item, m.selectedHubAltID, m.selectedProjectAltID)
+}
+
+// autodeskSignInURL is the page that forces an SSO login flow against the
+// user's default browser. After signing in, the user's browser holds a
+// valid accounts.autodesk.com session cookie, which is what's required for
+// subsequent direct links like fusionWebUrl to render correctly instead of
+// returning a raw "WEB SESSION INVALID" JSON error.
+const autodeskSignInURL = "https://accounts.autodesk.com/logon"
+
+// openAutodeskSignIn opens the Autodesk SSO sign-in page in the user's
+// default browser. Use this when pressing `o` on a document returns
+// "BROWSER_LOGIN_REQUIRED / WEB SESSION INVALID" — that error means the
+// browser isn't signed in to accounts.autodesk.com. Pressing [s] completes
+// the sign-in, after which [o] works for the remainder of the browser
+// session.
+func (m Model) openAutodeskSignIn() (Model, tea.Cmd) {
+	m.statusMsg = "Opening Autodesk sign-in…"
+	return m, openURLCmd(autodeskSignInURL)
 }
 
 // openInDesktop asks the running Fusion desktop client to open the selected
@@ -1526,7 +1561,7 @@ func (m Model) viewBrowser() string {
 	if !m.mouseEnabled {
 		mouseLabel = "[m] mouse:off"
 	}
-	helpText := "[↑↓/jk] move  [←→/l] nav  [h] hubs  [o] open  [r] refresh  [t] theme  " + mouseLabel + "  [a] about  [q] quit"
+	helpText := "[↑↓/jk] move  [←→/l] nav  [h] hubs  [o] open  [s] signin  [r] refresh  [t] theme  " + mouseLabel + "  [a] about  [q] quit"
 	// contentWidth is the writable area inside styleFooter's border+padding:
 	// border(none left/right) + padding(0,1) = 2 columns reserved. The border
 	// is drawn only on the top, so only horizontal padding consumes columns.
