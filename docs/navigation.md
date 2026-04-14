@@ -88,7 +88,7 @@ stateDiagram-v2
 | `stateAuthNeeded` | No valid token. Prompts user to press Enter to open browser login. |
 | `stateAuthWaiting` | Browser opened, local callback server running, waiting for OAuth redirect. |
 | `stateBrowsing` | Normal three-column (or four-column with details) interactive browser. |
-| `stateAbout` | Scrollable overlay showing version, copyright, MIT license, and third-party credits. |
+| `stateAbout` | Scrollable overlay showing version, copyright, GPL-3.0 license, and third-party credits. |
 | `stateDebug` | Scrollable overlay showing raw API request/response log (requires `APSNAV_DEBUG=1`). |
 | `stateError` | Fatal error with full message. Quit only. |
 

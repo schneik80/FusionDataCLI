@@ -135,4 +135,4 @@ APS_CLIENT_ID=your-client-id ./fusiondatacli
 
 ## License
 
-[MIT](LICENSE) — © Kevin Schneider
+[GNU General Public License v3.0](LICENSE) — © Kevin Schneider

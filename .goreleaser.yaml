@@ -49,7 +49,7 @@ brews:
     directory: Formula
     homepage: "https://github.com/schneik80/FusionDataCLI"
     description: "Terminal browser for Autodesk Platform Services Manufacturing Data Model"
-    license: "MIT"
+    license: "GPL-3.0"
     install: |
       bin.install "fusiondatacli"
     commit_author:
