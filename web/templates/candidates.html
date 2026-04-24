@@ -1,0 +1,84 @@
+{{define "candidates.html"}}
+{{$d := domID .ItemID}}
+<div class="candidates">
+  <button type="button" class="close-btn"
+          title="Close — refresh status badge"
+          hx-get="/items/{{.ItemID}}/status"
+          hx-target="#status-{{$d}}"
+          hx-swap="innerHTML">✕</button>
+  <h4>Parsed from description</h4>
+  {{if .ParseError}}
+    <div class="status-err">⚠ {{.ParseError}}</div>
+    <div class="prop-current" style="margin-top: 4px">Description: "{{.Description}}"</div>
+  {{else if .Parsed}}
+    <div class="prop-row"><label>Description</label><div>{{.Parsed.Description}}</div><div></div></div>
+    <div class="prop-row"><label>Standard</label><div>{{.Parsed.Standard}}{{if .Parsed.Equivalents}} <span class="prop-current">≈ {{range .Parsed.Equivalents}}{{.}} {{end}}</span>{{end}}</div><div></div></div>
+    {{if .Parsed.Thread}}<div class="prop-row"><label>Thread / Size</label><div>{{.Parsed.Thread}}</div><div></div></div>{{end}}
+    {{if .Parsed.Length}}<div class="prop-row"><label>Length</label><div>{{.Parsed.Length}} mm</div><div></div></div>{{end}}
+    {{if .Parsed.Info}}<div class="prop-row"><label>Type</label><div>{{.Parsed.Info.DisplayName}}</div><div></div></div>{{end}}
+  {{end}}
+
+  {{if .Vendors}}
+  <h4>Capture from Fastenal</h4>
+  <div class="vendor-list">
+    {{range .Vendors}}
+    <a class="vendor-pill" href="{{.URL}}" target="_blank" rel="noopener">
+      <span class="vendor-name">Search {{.Vendor}}</span>
+      <span class="vendor-arrow">↗</span>
+    </a>
+    {{end}}
+  </div>
+  <div class="vendor-hint">
+    <strong>1.</strong> Click the search above to find your product on Fastenal.<br>
+    <strong>2.</strong> On the product detail page, click the <em>Fasteners Enrich</em> bookmark in your bookmarks bar.<br>
+    <strong>3.</strong> Return here and click <em>Apply captured data</em>.
+  </div>
+  <form
+    class="sku-form"
+    hx-post="/items/{{.ItemID}}/sku-lookup"
+    hx-target="#review-{{$d}}"
+    hx-swap="innerHTML">
+    <button type="submit" class="row-action primary">Apply captured data</button>
+  </form>
+  {{end}}
+
+  <h4>Review &amp; accept</h4>
+  <div id="review-{{$d}}">
+    {{template "review_form" .}}
+  </div>
+</div>
+{{end}}
+
+{{/* Shared review form — used both inline (after Analyze) and as the
+     swap target when "Fill from SKU" fires. Fields are filled from the
+     .Proposed map which is populated differently depending on entry point. */}}
+{{define "review_form"}}
+{{$d := domID .ItemID}}
+<form
+  hx-post="/items/{{.ItemID}}/accept"
+  hx-target="#accept-status-{{$d}}"
+  hx-swap="innerHTML">
+  <input type="hidden" name="component_id" value="{{.ComponentID}}">
+
+  {{range $name := .Targets}}
+    {{if index $.Definitions $name}}
+      {{$val := index $.Proposed $name}}
+      <div class="prop-row">
+        <label>{{$name}}</label>
+        <div class="prop-current">
+          {{range $.Current}}{{if eq .Name $name}}current: {{if .Value}}{{.Value}}{{else}}—{{end}}{{end}}{{end}}
+        </div>
+        <div><input type="text" name="prop_{{$name}}" value="{{$val}}"{{if $val}} class="proposed"{{end}}></div>
+      </div>
+    {{end}}
+  {{end}}
+
+  <div class="prop-row" style="margin-top: 12px">
+    <div></div>
+    <div><span id="accept-status-{{$d}}"></span></div>
+    <div style="text-align: right">
+      <button type="submit" class="row-action primary">Accept &amp; Write</button>
+    </div>
+  </div>
+</form>
+{{end}}

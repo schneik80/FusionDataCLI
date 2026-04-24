@@ -19,7 +19,7 @@ import (
 const (
 	authEndpoint  = "https://developer.api.autodesk.com/authentication/v2/authorize"
 	tokenEndpoint = "https://developer.api.autodesk.com/authentication/v2/token"
-	authScope     = "data:read user-profile:read"
+	authScope     = "data:read data:write data:search user-profile:read"
 )
 
 // Login performs the full 3-legged PKCE OAuth flow.

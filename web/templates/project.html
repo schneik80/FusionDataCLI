@@ -1,0 +1,370 @@
+{{define "project.html"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fasteners Enrichment — {{.Version}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js"></script>
+<style>
+  /* Palette ported from PowerTools Assembly Builder (Fusion dark). */
+  :root {
+    --bg-primary: #2A3442;
+    --bg-panel: #323E50;
+    --bg-row: #323E50;
+    --bg-row-hover: #3a475b;
+    --bg-input-focus: #1e2a38;
+    --border-color: #4a5568;
+    --border-hover: #0696d7;
+    --text-primary: #ffffff;
+    --text-secondary: #a0aec0;
+    --text-muted: #718096;
+    --accent: #0696d7;
+    --accent-hover: #0aa3e8;
+    --btn-bg: #3e4b5e;
+    --btn-text: #ffffff;
+    --btn-border: #4a5568;
+    --shadow-panel: 0 2px 8px rgba(0,0,0,0.3);
+    --ok: #48bb78;
+    --warn: #ecc94b;
+    --err: #f56565;
+    --proposed-bg: rgba(6,150,215,0.10);
+  }
+  body.light {
+    --bg-primary: #f4f4f4;
+    --bg-panel: #ffffff;
+    --bg-row: #ffffff;
+    --bg-row-hover: #f0f4f8;
+    --bg-input-focus: #f0f0f0;
+    --border-color: #d1d5db;
+    --border-hover: #0696d7;
+    --text-primary: #333333;
+    --text-secondary: #555555;
+    --text-muted: #888888;
+    --accent: #0696d7;
+    --accent-hover: #0580b8;
+    --btn-bg: #e5e7eb;
+    --btn-text: #333333;
+    --btn-border: #d1d5db;
+    --shadow-panel: 0 2px 4px rgba(0,0,0,0.08);
+    --proposed-bg: rgba(6,150,215,0.08);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: 'Montserrat', Helvetica, Arial, sans-serif;
+    font-size: 13px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.5;
+  }
+
+  /* Toolbar */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 16px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border-color);
+    box-shadow: var(--shadow-panel);
+  }
+  .toolbar h1 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.3px;
+  }
+  .toolbar .meta {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: 'SF Mono', Menlo, monospace;
+  }
+  .toolbar .spacer { flex: 1; }
+  .toolbar button {
+    background: var(--btn-bg);
+    color: var(--btn-text);
+    border: 1px solid var(--btn-border);
+    padding: 5px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    transition: border 0.15s;
+  }
+  .toolbar button:hover {
+    border: 2px solid var(--border-hover);
+    padding: 4px 11px; /* keep size constant under thicker border */
+  }
+  .bookmarklet-install {
+    background: var(--btn-bg);
+    color: var(--btn-text);
+    border: 1px solid var(--btn-border);
+    border-left: 3px solid var(--accent);
+    padding: 5px 12px 5px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    text-decoration: none;
+    cursor: grab;
+    transition: border 0.15s;
+    user-select: all; /* so drag picks up the href cleanly */
+  }
+  .bookmarklet-install:hover {
+    border: 2px solid var(--border-hover);
+    border-left: 3px solid var(--accent);
+    padding: 4px 11px 4px 9px;
+  }
+  .bookmarklet-install:active { cursor: grabbing; }
+
+  /* Table wrapper */
+  main {
+    padding: 16px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  .table-wrap {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: var(--shadow-panel);
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th, td {
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-color);
+    vertical-align: top;
+  }
+  th {
+    background: var(--bg-panel);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+  }
+  tbody tr { background: var(--bg-row); transition: background 0.15s; }
+  tbody tr:hover { background: var(--bg-row-hover); }
+  tbody tr:last-child td { border-bottom: none; }
+
+  .item-name { font-weight: 500; color: var(--text-primary); }
+  .item-id { color: var(--text-muted); font-family: 'SF Mono', Menlo, monospace; font-size: 11px; margin-top: 2px; }
+
+  /* Row-level action button — same hover-border pattern as toolbar */
+  button.row-action {
+    background: var(--btn-bg);
+    color: var(--btn-text);
+    border: 1px solid var(--btn-border);
+    padding: 4px 11px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    transition: border 0.15s;
+  }
+  button.row-action:hover {
+    border: 2px solid var(--border-hover);
+    padding: 3px 10px;
+  }
+  button.row-action.primary { border-left: 3px solid var(--accent); padding-left: 9px; }
+  button.row-action.primary:hover { padding-left: 8px; }
+
+  /* Candidates panel — appears inside the Status column when Analyze fires. */
+  .candidates {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    padding: 12px 14px;
+    margin: 4px 0;
+    position: relative;
+  }
+  .candidates .close-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 22px;
+    height: 22px;
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: inherit;
+    line-height: 1;
+    padding: 0;
+    transition: color 0.15s, border 0.15s;
+  }
+  .candidates .close-btn:hover {
+    color: var(--err);
+    border-color: var(--err);
+  }
+  .candidates h4 {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    margin: 0 0 8px 0;
+    font-weight: 600;
+  }
+  .candidates h4:not(:first-child) { margin-top: 14px; }
+  .prop-row {
+    display: grid;
+    grid-template-columns: 180px 1fr 1fr;
+    gap: 12px;
+    padding: 4px 0;
+    align-items: center;
+  }
+  .prop-row label {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-secondary);
+  }
+  .prop-row > div { font-size: 12px; }
+  .prop-row input[type="text"] {
+    width: 100%;
+    padding: 4px 8px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--text-primary);
+    transition: border 0.15s;
+  }
+  .prop-row input[type="text"]:focus {
+    outline: none;
+    border: 1px solid var(--border-hover);
+    background: var(--bg-input-focus);
+  }
+  .prop-row input.proposed { background: var(--proposed-bg); }
+  .prop-current { color: var(--text-muted); font-family: 'SF Mono', Menlo, monospace; font-size: 11px; }
+
+  .status-ok { color: var(--ok); font-weight: 500; }
+  .status-warn { color: var(--warn); }
+  .status-err { color: var(--err); }
+
+  /* Enrichment badges — fill/text colors keyed to severity. */
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-variant-numeric: tabular-nums;
+  }
+  .badge-unenriched { background: rgba(245,101,101,0.15); color: var(--err); border: 1px solid rgba(245,101,101,0.3); }
+  .badge-partial    { background: rgba(236,201,75,0.15); color: var(--warn); border: 1px solid rgba(236,201,75,0.3); }
+  .badge-enriched   { background: rgba(72,187,120,0.15); color: var(--ok); border: 1px solid rgba(72,187,120,0.3); }
+  .badge-err        { background: rgba(113,128,150,0.15); color: var(--text-muted); border: 1px solid var(--border-color); }
+  .badge-loading    { background: transparent; color: var(--text-muted); border: 1px dashed var(--border-color); }
+
+  /* Vendor deep-link pills — same hover-thicken pattern as buttons. */
+  .vendor-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 2px; }
+  .vendor-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: var(--btn-bg);
+    color: var(--btn-text);
+    border: 1px solid var(--btn-border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    text-decoration: none;
+    font-size: 12px;
+    font-weight: 500;
+    transition: border 0.15s;
+  }
+  .vendor-pill:hover {
+    border: 2px solid var(--border-hover);
+    border-left: 3px solid var(--accent);
+    padding: 3px 9px;
+  }
+  .vendor-pill .vendor-arrow { color: var(--text-muted); font-size: 10px; }
+  .vendor-hint { font-size: 11px; color: var(--text-muted); margin: 4px 0 8px; line-height: 1.5; }
+
+  /* SKU paste-back row under the Fastenal search pill. */
+  .sku-form { display: flex; gap: 8px; margin: 4px 0 8px; align-items: center; }
+  .sku-input {
+    flex: 1;
+    padding: 5px 10px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--text-primary);
+    transition: border 0.15s;
+  }
+  .sku-input:focus {
+    outline: none;
+    border: 1px solid var(--border-hover);
+    background: var(--bg-input-focus);
+  }
+  .sku-result { margin-top: 8px; }
+
+  .htmx-indicator { opacity: 0; transition: opacity 0.2s; color: var(--text-muted); font-size: 11px; margin-left: 6px; }
+  .htmx-request .htmx-indicator { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <h1>Fasteners Enrichment</h1>
+  <span class="meta">hub {{truncate .HubID 50}}</span>
+  <span class="meta">project {{truncate .ProjectID 50}}</span>
+  <span class="meta">{{.DefCount}} defs cached</span>
+  <div class="spacer"></div>
+  {{.BookmarkletLink}}
+  <button onclick="document.body.classList.toggle('light')">Theme</button>
+</div>
+<main>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 40%">Item</th>
+          <th style="width: 45%">Status</th>
+          <th style="width: 15%; text-align: right">Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Items}}
+        {{$d := domID .ID}}
+        <tr id="row-{{$d}}">
+          <td>
+            <div class="item-name">{{.Name}}</div>
+            <div class="item-id">{{.ID}}</div>
+          </td>
+          <td id="status-{{$d}}"
+              hx-get="/items/{{.ID}}/status"
+              hx-trigger="load"
+              hx-swap="innerHTML"><span class="badge badge-loading">loading…</span></td>
+          <td style="text-align: right; white-space: nowrap">
+            <button class="row-action primary"
+              hx-post="/items/{{.ID}}/analyze"
+              hx-target="#status-{{$d}}"
+              hx-swap="innerHTML"
+              hx-indicator="#ind-{{$d}}"
+              hx-vals='{"name": {{.Name}}}'>
+              Analyze
+            </button>
+            <span id="ind-{{$d}}" class="htmx-indicator">…</span>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</main>
+</body>
+</html>{{end}}

@@ -1,0 +1,15 @@
+{{define "sku_result.html"}}
+{{if .Lookup.Error}}
+  <div class="status-warn" style="margin-bottom: 8px">
+    ⚠ {{.Lookup.Error}}<br>
+    <a href="{{.Lookup.URL}}" target="_blank" rel="noopener" style="color: var(--accent)">Open SKU {{.SKU}} on Fastenal ↗</a>
+  </div>
+  <div class="vendor-hint">The scrape failed. Open the link above, copy the visible fields (Manufacturer, Price, Package), and paste them into the review form below before clicking Accept.</div>
+{{else}}
+  <div class="status-ok" style="margin-bottom: 8px">
+    ✓ Fetched SKU {{.SKU}} — review below before writing.
+    <a href="{{.Lookup.URL}}" target="_blank" rel="noopener" style="color: var(--accent); margin-left: 8px; font-weight: 400">open on Fastenal ↗</a>
+  </div>
+{{end}}
+{{template "review_form" .}}
+{{end}}
