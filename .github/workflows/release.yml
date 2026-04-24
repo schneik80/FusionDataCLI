@@ -33,3 +33,158 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APS_CLIENT_ID: ${{ secrets.APS_CLIENT_ID }}
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+  mac-installer:
+    needs: release
+    runs-on: macos-latest
+    env:
+      BUNDLE_ID: com.industrialmachineartsllc.fusiondatacli
+      MODULE: github.com/schneik80/FusionDataCLI
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Import signing certificate
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Decode certificate (.p12 must contain BOTH "Developer ID Application"
+          # and "Developer ID Installer" identities)
+          echo "${APPLE_CERTIFICATE_P12}" | base64 --decode > /tmp/certificate.p12
+
+          # Create temporary keychain
+          KEYCHAIN_PATH="/tmp/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+
+          # Import certificate into keychain
+          security import /tmp/certificate.p12 \
+            -P "${APPLE_CERTIFICATE_PASSWORD}" \
+            -A -t cert -f pkcs12 \
+            -k "${KEYCHAIN_PATH}"
+
+          # Allow codesign / productsign to access the keychain
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+
+          # Add keychain to search list
+          security list-keychains -d user -s "${KEYCHAIN_PATH}" $(security list-keychains -d user | tr -d '"')
+
+          # Clean up certificate file
+          rm /tmp/certificate.p12
+
+      - name: Build universal binary
+        env:
+          APS_CLIENT_ID: ${{ secrets.APS_CLIENT_ID }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          LDFLAGS="-s -w \
+            -X main.version=${VERSION} \
+            -X ${MODULE}/config.DefaultClientID=${APS_CLIENT_ID}"
+
+          mkdir -p build
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
+            go build -ldflags "${LDFLAGS}" -o build/fusiondatacli-arm64 .
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 \
+            go build -ldflags "${LDFLAGS}" -o build/fusiondatacli-amd64 .
+
+          lipo -create -output build/fusiondatacli \
+            build/fusiondatacli-arm64 build/fusiondatacli-amd64
+          rm build/fusiondatacli-arm64 build/fusiondatacli-amd64
+          file build/fusiondatacli
+
+      - name: Codesign binary
+        run: |
+          APP_IDENTITY=$(security find-identity -v -p codesigning /tmp/build.keychain-db \
+            | grep "Developer ID Application" \
+            | head -1 \
+            | sed -E 's/^[^"]*"(.+)".*$/\1/')
+
+          if [ -z "${APP_IDENTITY}" ]; then
+            echo "::error::No Developer ID Application certificate found in keychain"
+            exit 1
+          fi
+          echo "Found application signing identity: ${APP_IDENTITY}"
+
+          codesign --force --options runtime --timestamp \
+            --sign "${APP_IDENTITY}" \
+            build/fusiondatacli
+          codesign --verify --strict --verbose=2 build/fusiondatacli
+
+      - name: Stage payload
+        run: |
+          STAGING="/tmp/pkg-root/usr/local/bin"
+          mkdir -p "${STAGING}"
+          cp build/fusiondatacli "${STAGING}/fusiondatacli"
+          chmod +x "${STAGING}/fusiondatacli"
+
+      - name: Build and sign .pkg
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKG_NAME="FusionDataCLI-${VERSION}-darwin-universal.pkg"
+          echo "PKG_NAME=${PKG_NAME}" >> "${GITHUB_ENV}"
+
+          INSTALLER_IDENTITY=$(security find-identity -v /tmp/build.keychain-db \
+            | grep "Developer ID Installer" \
+            | head -1 \
+            | sed -E 's/^[^"]*"(.+)".*$/\1/')
+
+          if [ -z "${INSTALLER_IDENTITY}" ]; then
+            echo "::error::No Developer ID Installer certificate found in keychain"
+            exit 1
+          fi
+          echo "Found installer signing identity: ${INSTALLER_IDENTITY}"
+
+          pkgbuild \
+            --root /tmp/pkg-root \
+            --identifier "${BUNDLE_ID}" \
+            --version "${VERSION}" \
+            --install-location / \
+            "${PKG_NAME}.unsigned"
+
+          productsign \
+            --sign "${INSTALLER_IDENTITY}" \
+            "${PKG_NAME}.unsigned" \
+            "${PKG_NAME}"
+
+          rm "${PKG_NAME}.unsigned"
+
+      - name: Notarize .pkg
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcrun notarytool submit "${PKG_NAME}" \
+            --apple-id "${APPLE_ID}" \
+            --password "${APPLE_ID_PASSWORD}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --wait
+
+          xcrun stapler staple "${PKG_NAME}"
+
+      - name: Clean up keychain
+        if: always()
+        run: |
+          security delete-keychain /tmp/build.keychain-db 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-installer
+          path: "*.pkg"
+
+      - name: Upload .pkg to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" "${PKG_NAME}" --clobber
