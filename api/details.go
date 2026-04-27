@@ -26,6 +26,9 @@ type ItemDetails struct {
 	PartDesc    string
 	Material    string
 	IsMilestone bool
+	// RootComponentVersionID is the id of tipRootComponentVersion — required
+	// as the componentVersionId argument when requesting a STEP derivative.
+	RootComponentVersionID string
 	// Version history (most recent first)
 	Versions []VersionSummary
 }
@@ -57,6 +60,7 @@ func GetItemDetails(ctx context.Context, token, hubID, itemID string) (*ItemDeta
 					fusionWebUrl
 					tipVersion { versionNumber }
 					tipRootComponentVersion {
+						id
 						partNumber
 						partDescription
 						materialName
@@ -104,6 +108,7 @@ func GetItemDetails(ctx context.Context, token, hubID, itemID string) (*ItemDeta
 				VersionNumber int `json:"versionNumber"`
 			} `json:"tipVersion"`
 			TipRootComponentVersion struct {
+				ID          string `json:"id"`
 				PartNumber  string `json:"partNumber"`
 				PartDesc    string `json:"partDescription"`
 				Material    string `json:"materialName"`
@@ -137,10 +142,11 @@ func GetItemDetails(ctx context.Context, token, hubID, itemID string) (*ItemDeta
 		ModifiedOn:    parseTime(raw.Item.ModifiedOn),
 		ModifiedBy:    raw.Item.ModifiedBy.fullName(),
 		VersionNumber: raw.Item.TipVersion.VersionNumber,
-		PartNumber:    raw.Item.TipRootComponentVersion.PartNumber,
-		PartDesc:      raw.Item.TipRootComponentVersion.PartDesc,
-		Material:      raw.Item.TipRootComponentVersion.Material,
-		IsMilestone:   raw.Item.TipRootComponentVersion.IsMilestone,
+		PartNumber:             raw.Item.TipRootComponentVersion.PartNumber,
+		PartDesc:               raw.Item.TipRootComponentVersion.PartDesc,
+		Material:               raw.Item.TipRootComponentVersion.Material,
+		IsMilestone:            raw.Item.TipRootComponentVersion.IsMilestone,
+		RootComponentVersionID: raw.Item.TipRootComponentVersion.ID,
 	}
 
 	// Versions — most recent first.

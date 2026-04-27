@@ -65,6 +65,26 @@ type (
 		action string
 		err    error
 	}
+	// stepStatusMsg reports the current state of a STEP derivative
+	// generation request. Either err is set (transport failure) or status
+	// is one of api.StepStatus*. When status is SUCCESS, signedURL is the
+	// pre-authenticated download URL.
+	stepStatusMsg struct {
+		status    string
+		signedURL string
+		err       error
+		// cvid + name are echoed back so the Update handler can keep
+		// polling / continue with the download without having to look
+		// the design back up in the model (which may have moved on).
+		cvid string
+		name string
+	}
+	// stepDoneMsg fires after the STEP file has been written to disk
+	// (path) or the download/translation has failed (err).
+	stepDoneMsg struct {
+		path string
+		err  error
+	}
 )
 
 // ---------------------------------------------------------------------------
@@ -125,6 +145,10 @@ type Model struct {
 
 	spinner      spinner.Model
 	mouseEnabled bool
+
+	// True while a STEP translation request + download is in flight. Used
+	// to suppress concurrent [d] presses so multiple polls don't pile up.
+	downloadInProgress bool
 }
 
 // New creates the initial model. cfgErr may be non-nil when the config file is
@@ -314,6 +338,55 @@ func insertInFusionCmd(fileID, expectedProjectAltID, expectedProjectName, expect
 	}
 }
 
+// requestStepCmd issues the GraphQL query that initiates STEP generation
+// (the first call) and reports its current status (subsequent calls). The
+// query is idempotent: APS keeps generating the derivative between calls.
+func requestStepCmd(token, cvid, name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		status, signedURL, err := api.RequestSTEPDerivative(ctx, token, cvid)
+		return stepStatusMsg{
+			status:    status,
+			signedURL: signedURL,
+			err:       err,
+			cvid:      cvid,
+			name:      name,
+		}
+	}
+}
+
+// pollStepCmdAfter waits d, then re-issues the STEP status query.
+func pollStepCmdAfter(d time.Duration, token, cvid, name string) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		status, signedURL, err := api.RequestSTEPDerivative(ctx, token, cvid)
+		return stepStatusMsg{
+			status:    status,
+			signedURL: signedURL,
+			err:       err,
+			cvid:      cvid,
+			name:      name,
+		}
+	})
+}
+
+// downloadStepFileCmd streams the signed-URL response to a file under the
+// user's Downloads directory and returns a stepDoneMsg with the final path
+// (or any error encountered).
+func downloadStepFileCmd(token, signedURL, name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		path := api.StepDownloadPath(name)
+		if err := api.DownloadFile(ctx, token, signedURL, path); err != nil {
+			return stepDoneMsg{err: err}
+		}
+		return stepDoneMsg{path: path}
+	}
+}
+
 // verifySameHub returns nil when Fusion's active hub contains the CLI's
 // currently-selected project. Otherwise it returns an error whose message
 // names the expected hub so the status bar can tell the user to switch
@@ -450,6 +523,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case stepStatusMsg:
+		if msg.err != nil {
+			m.downloadInProgress = false
+			m.statusMsg = "STEP error: " + msg.err.Error()
+			return m, nil
+		}
+		switch msg.status {
+		case api.StepStatusSuccess:
+			m.statusMsg = "Downloading STEP for " + msg.name + "…"
+			return m, downloadStepFileCmd(m.token, msg.signedURL, msg.name)
+		case api.StepStatusFailed:
+			m.downloadInProgress = false
+			m.statusMsg = "STEP translation failed for " + msg.name
+			return m, nil
+		default:
+			// PENDING (or any other transient state) — keep polling.
+			m.statusMsg = "Generating STEP for " + msg.name + "… (this may take a moment)"
+			return m, pollStepCmdAfter(2*time.Second, m.token, msg.cvid, msg.name)
+		}
+
+	case stepDoneMsg:
+		m.downloadInProgress = false
+		if msg.err != nil {
+			m.statusMsg = "STEP download failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.statusMsg = "Saved STEP file: " + msg.path
+		return m, nil
+
 	case errMsg:
 		m.err = msg.err
 		m.state = stateError
@@ -582,6 +684,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Insert):
 		return m.insertInDesktop()
+
+	case key.Matches(msg, keys.Download):
+		return m.downloadStep()
 
 	case key.Matches(msg, keys.Refresh):
 		return m.refresh()
@@ -1028,6 +1133,46 @@ func (m Model) insertInDesktop() (Model, tea.Cmd) {
 	}
 	m.statusMsg = "Inserting in Fusion…"
 	return m, insertInFusionCmd(item.ID, m.selectedProjectAltID, projName, m.selectedHubName())
+}
+
+// downloadStep starts the STEP-translation + download workflow for the
+// currently selected design. Like [o], it requires the details panel to
+// be loaded so we have the tipRootComponentVersion id needed to ask the
+// MFG Data Model API for a STEP derivative. STEP export is only valid
+// for DesignItems (drawings, configured designs and basic items aren't
+// supported by the componentVersion-derivatives endpoint here).
+//
+// The translation is asynchronous: this function dispatches the initial
+// GraphQL request and the Update loop drives polling + the eventual
+// HTTP download to disk via stepStatusMsg / stepDoneMsg.
+func (m Model) downloadStep() (Model, tea.Cmd) {
+	item := m.selectedItem(m.activeCol)
+	if item == nil || item.IsContainer {
+		return m, nil
+	}
+	if m.downloadInProgress {
+		m.statusMsg = "STEP download already in progress…"
+		return m, nil
+	}
+	if m.details == nil {
+		if m.detailsLoading {
+			m.statusMsg = "Wait for details to load before pressing d"
+		} else {
+			m.statusMsg = "No details available for this item"
+		}
+		return m, nil
+	}
+	if m.details.Typename != "DesignItem" {
+		m.statusMsg = "STEP download is only supported for designs"
+		return m, nil
+	}
+	if m.details.RootComponentVersionID == "" {
+		m.statusMsg = "No component version available for this design"
+		return m, nil
+	}
+	m.downloadInProgress = true
+	m.statusMsg = "Requesting STEP translation for " + m.details.Name + "…"
+	return m, requestStepCmd(m.token, m.details.RootComponentVersionID, m.details.Name)
 }
 
 // selectedHubName returns the display name of the currently-selected hub,
@@ -1713,7 +1858,14 @@ func (m Model) viewDetailsColumn(width, height int) string {
 			sb.WriteString("\n")
 		}
 		sb.WriteString("\n")
-		sb.WriteString(styleItemDim.Width(inner).Render("[o] web  [f] open  [i] insert"))
+		hint := "[o] web  [f] open  [i] insert"
+		// [d] download is only meaningful for designs — drawings and other
+		// item kinds don't have a component version we can hand to the
+		// STEP derivative endpoint.
+		if m.details.Typename == "DesignItem" {
+			hint += "  [d] step"
+		}
+		sb.WriteString(styleItemDim.Width(inner).Render(hint))
 	}
 
 	return styleColumnInactive.Width(width).Height(height).Render(sb.String())

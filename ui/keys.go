@@ -12,7 +12,7 @@ type keyMap struct {
 	OpenDesktop key.Binding
 	Insert      key.Binding
 	Refresh     key.Binding
-	Details     key.Binding
+	Download    key.Binding
 	Hub         key.Binding
 	About       key.Binding
 	Theme       key.Binding
@@ -58,9 +58,9 @@ var keys = keyMap{
 		key.WithKeys("r"),
 		key.WithHelp("r", "refresh"),
 	),
-	Details: key.NewBinding(
+	Download: key.NewBinding(
 		key.WithKeys("d"),
-		key.WithHelp("d", "details"),
+		key.WithHelp("d", "download STEP"),
 	),
 	Hub: key.NewBinding(
 		key.WithKeys("h"),
