@@ -71,16 +71,16 @@ func gqlQuery(ctx context.Context, token, q string, vars map[string]any) (json.R
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, fmt.Errorf("unauthorized — token may be expired (re-run to reauthenticate)")
-	}
-
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
 	dbgLog("RESPONSE HTTP %d\n%s", resp.StatusCode, raw)
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("unauthorized (HTTP 401) — token may be expired or lacks scope/entitlement; body: %s", raw)
+	}
 
 	var gr gqlResponse
 	if err := json.Unmarshal(raw, &gr); err != nil {
