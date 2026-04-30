@@ -8,11 +8,11 @@ import (
 )
 
 // pageSize is the per-page result count requested from the GraphQL API.
-// APS caps total query cost at 1000 complexity points; with the field set
-// we request, 200 results scored ~1211 and triggered "query point exceeds
-// maximum entry point" errors, so we cap at 100 — still 2× the original
-// 50 and well under the cost ceiling.
-const pageSize = 100
+// APS rejects values ≥ 100 ("pagination must be between 0 and 100") and
+// also enforces a 1000-point query-complexity cap that 200 results blew
+// through with our field set. 50 is the original safe value used since
+// the project's first version.
+const pageSize = 50
 
 // allPages calls the API repeatedly until no next-page cursor is returned,
 // accumulating typed results across pages. It is parameterised on T so the
@@ -75,7 +75,7 @@ func allPages[T any](
 func GetHubs(ctx context.Context, token string) ([]NavItem, error) {
 	const qFirst = `
 		query GetHubs {
-			hubs(pagination: { limit: 100 }) {
+			hubs(pagination: { limit: 50 }) {
 				pagination { cursor }
 				results {
 					id name fusionWebUrl
@@ -85,7 +85,7 @@ func GetHubs(ctx context.Context, token string) ([]NavItem, error) {
 		}`
 	const qNext = `
 		query GetHubsNext($cursor: String!) {
-			hubs(pagination: { cursor: $cursor, limit: 100 }) {
+			hubs(pagination: { cursor: $cursor, limit: 50 }) {
 				pagination { cursor }
 				results {
 					id name fusionWebUrl
@@ -143,7 +143,7 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetProjects($hubId: ID!) {
 			hub(hubId: $hubId) {
-				projects(pagination: { limit: 100 }) {
+				projects(pagination: { limit: 50 }) {
 					pagination { cursor }
 					results {
 						id name fusionWebUrl projectStatus projectType
@@ -155,7 +155,7 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 	const qNext = `
 		query GetProjectsNext($hubId: ID!, $cursor: String!) {
 			hub(hubId: $hubId) {
-				projects(pagination: { cursor: $cursor, limit: 100 }) {
+				projects(pagination: { cursor: $cursor, limit: 50 }) {
 					pagination { cursor }
 					results {
 						id name fusionWebUrl projectStatus projectType
@@ -220,14 +220,14 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 func GetFolders(ctx context.Context, token, projectID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetFolders($projectId: ID!) {
-			foldersByProject(projectId: $projectId, pagination: { limit: 100 }) {
+			foldersByProject(projectId: $projectId, pagination: { limit: 50 }) {
 				pagination { cursor }
 				results { id name }
 			}
 		}`
 	const qNext = `
 		query GetFoldersNext($projectId: ID!, $cursor: String!) {
-			foldersByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 100 }) {
+			foldersByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 50 }) {
 				pagination { cursor }
 				results { id name }
 			}
@@ -270,14 +270,14 @@ func GetFolders(ctx context.Context, token, projectID string) ([]NavItem, error)
 func GetProjectItems(ctx context.Context, token, projectID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetProjectItems($projectId: ID!) {
-			itemsByProject(projectId: $projectId, pagination: { limit: 100 }) {
+			itemsByProject(projectId: $projectId, pagination: { limit: 50 }) {
 				pagination { cursor }
 				results { __typename id name }
 			}
 		}`
 	const qNext = `
 		query GetProjectItemsNext($projectId: ID!, $cursor: String!) {
-			itemsByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 100 }) {
+			itemsByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 50 }) {
 				pagination { cursor }
 				results { __typename id name }
 			}
@@ -321,14 +321,14 @@ func GetProjectItems(ctx context.Context, token, projectID string) ([]NavItem, e
 func GetItems(ctx context.Context, token, hubID, folderID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetItems($hubId: ID!, $folderId: ID!) {
-			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { limit: 100 }) {
+			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { limit: 50 }) {
 				pagination { cursor }
 				results { __typename id name }
 			}
 		}`
 	const qNext = `
 		query GetItemsNext($hubId: ID!, $folderId: ID!, $cursor: String!) {
-			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { cursor: $cursor, limit: 100 }) {
+			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { cursor: $cursor, limit: 50 }) {
 				pagination { cursor }
 				results { __typename id name }
 			}
