@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -56,19 +57,40 @@ type toolCallResult struct {
 	IsError bool `json:"isError,omitempty"`
 }
 
-// Client is a simple Fusion MCP client. Each public method establishes its
-// own session; sessions are short-lived and not reused between calls.
+// sharedHTTPClient is reused by every MCP operation so connections stay
+// keep-alive between calls (avoids re-establishing TCP and TLS state to
+// 127.0.0.1, which is cheap but not free, and lets the runtime reuse
+// transport buffers).
+var sharedHTTPClient = &http.Client{Timeout: defaultTimeout}
+
+// Client is a Fusion MCP client. A single Client is intended to be reused
+// across multiple operations: the MCP session ID is cached after the first
+// init handshake and reused on subsequent calls, dropping ~2 HTTP round-
+// trips per user action. If the server invalidates the session (404/410),
+// the cache is dropped and a fresh handshake runs once.
 type Client struct {
 	Endpoint string
 	HTTP     *http.Client
+
+	mu        sync.Mutex
+	sessionID string
+	sessionOK bool // false until initSession has succeeded at least once
 }
 
-// NewClient returns a Client pointed at the default local Fusion endpoint.
+// defaultClient is the process-wide singleton returned by NewClient. It
+// makes sure repeated NewClient() calls (one per tea.Cmd in the UI) all
+// share the same session-id cache; otherwise every action would still pay
+// for the init handshake.
+var defaultClient = &Client{
+	Endpoint: DefaultEndpoint,
+	HTTP:     sharedHTTPClient,
+}
+
+// NewClient returns the shared Fusion MCP client. The returned pointer is
+// safe for concurrent use — the underlying http.Client is shared and the
+// session-id cache is mutex-guarded.
 func NewClient() *Client {
-	return &Client{
-		Endpoint: DefaultEndpoint,
-		HTTP:     &http.Client{Timeout: defaultTimeout},
-	}
+	return defaultClient
 }
 
 // HubProject is a single project returned by ActiveHubProjects. The ID is
@@ -119,11 +141,7 @@ func NormalizeProjectID(dmAPIProjectID string) string {
 // request through app.data directly. Callers can use the returned project
 // IDs to verify that a separately-browsed hub matches Fusion's active hub.
 func (c *Client) ActiveHubProjects(ctx context.Context) ([]HubProject, error) {
-	sid, err := c.initSession(ctx)
-	if err != nil {
-		return nil, err
-	}
-	tr, err := c.callTool(ctx, sid, "fusion_mcp_read", map[string]any{
+	tr, err := c.invoke(ctx, "fusion_mcp_read", map[string]any{
 		"queryType": "projects",
 	})
 	if err != nil {
@@ -152,11 +170,7 @@ func (c *Client) OpenDocument(ctx context.Context, fileId string) error {
 	if fileId == "" {
 		return errors.New("fusion: empty fileId")
 	}
-	sid, err := c.initSession(ctx)
-	if err != nil {
-		return err
-	}
-	_, err = c.callTool(ctx, sid, "fusion_mcp_execute", map[string]any{
+	_, err := c.invoke(ctx, "fusion_mcp_execute", map[string]any{
 		"featureType": "document",
 		"object": map[string]any{
 			"operation": "open",
@@ -173,18 +187,71 @@ func (c *Client) InsertDocument(ctx context.Context, fileId string) error {
 	if fileId == "" {
 		return errors.New("fusion: empty fileId")
 	}
-	sid, err := c.initSession(ctx)
-	if err != nil {
-		return err
-	}
 	script := buildInsertScript(fileId)
-	_, err = c.callTool(ctx, sid, "fusion_mcp_execute", map[string]any{
+	_, err := c.invoke(ctx, "fusion_mcp_execute", map[string]any{
 		"featureType": "script",
 		"object": map[string]any{
 			"script": script,
 		},
 	})
 	return err
+}
+
+// errSessionExpired is returned by callTool when the MCP server has
+// invalidated our cached session. The caller (invoke) catches it, drops
+// the cache, and retries once with a fresh handshake.
+var errSessionExpired = errors.New("mcp session expired")
+
+// invoke wraps a tool call with session caching: it reuses the previously-
+// negotiated session ID when present, and on a 404/410 from the server it
+// drops the cache and retries once.
+func (c *Client) invoke(ctx context.Context, name string, args map[string]any) (*toolCallResult, error) {
+	sid, err := c.session(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tr, err := c.callTool(ctx, sid, name, args)
+	if errors.Is(err, errSessionExpired) {
+		c.dropSession()
+		sid, err = c.session(ctx)
+		if err != nil {
+			return nil, err
+		}
+		tr, err = c.callTool(ctx, sid, name, args)
+	}
+	return tr, err
+}
+
+// session returns the cached session ID, lazily running the init handshake
+// on first use (or after dropSession).
+func (c *Client) session(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	if c.sessionOK {
+		sid := c.sessionID
+		c.mu.Unlock()
+		return sid, nil
+	}
+	c.mu.Unlock()
+
+	sid, err := c.initSession(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	c.mu.Lock()
+	c.sessionID = sid
+	c.sessionOK = true
+	c.mu.Unlock()
+	return sid, nil
+}
+
+// dropSession invalidates the cached session ID so the next session() call
+// re-runs the init handshake.
+func (c *Client) dropSession() {
+	c.mu.Lock()
+	c.sessionID = ""
+	c.sessionOK = false
+	c.mu.Unlock()
 }
 
 // buildInsertScript returns a Python script that inserts the given file as a
@@ -294,6 +361,11 @@ func (c *Client) callTool(ctx context.Context, sid, name string, args map[string
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+		// Session was dropped by the MCP server — caller will retry with
+		// a fresh handshake.
+		return nil, errSessionExpired
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fusion MCP call HTTP %d: %s", resp.StatusCode, string(raw))
 	}

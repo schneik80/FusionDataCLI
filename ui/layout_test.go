@@ -67,6 +67,8 @@ func sampleBrowsingModel(width, height int) Model {
 			{{ID: "P1", Name: "4WD Buggy", Kind: "project", IsContainer: true}},
 			{{ID: "D1", Name: "MyDesign", Kind: "design"}},
 		},
-		details: &api.ItemDetails{Name: "MyDesign", Size: "12345"},
+		details:      &api.ItemDetails{Name: "MyDesign", Size: "12345"},
+		detailsCache: make(map[string]*api.ItemDetails),
+		styleCache:   &styleCache{},
 	}
 }

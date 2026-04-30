@@ -7,25 +7,29 @@ import (
 	"strings"
 )
 
-// allPages calls the API repeatedly until no next-page cursor is returned.
-// queryFirst is used for the first call (no cursor argument in pagination).
-// queryNext is used for all subsequent calls ($cursor: String! is required).
-// vars is the base variables map (without cursor); it is copied each call.
-// extract receives the raw JSON data and returns the next cursor plus the
-// raw results slice to be appended by the caller.
-type pageResult struct {
-	cursor string
-	data   json.RawMessage
-}
+// pageSize is the per-page result count requested from the GraphQL API.
+// 200 is the documented maximum for the Manufacturing Data Model paginated
+// fields and lets typical hubs / projects fit in a single round-trip.
+const pageSize = 200
 
-func allPages(
+// allPages calls the API repeatedly until no next-page cursor is returned,
+// accumulating typed results across pages. It is parameterised on T so the
+// extract callback can decode straight into the caller's value type — no
+// intermediate json.RawMessage round-trip per page.
+//
+// queryFirst is used for the first call (no cursor argument).
+// queryNext  is used for all subsequent calls ($cursor: String! is required).
+// baseVars   is the base variable map (without cursor); copied each call.
+// extract    receives the raw JSON data and returns the next cursor plus the
+//            decoded slice of T for that page.
+func allPages[T any](
 	ctx context.Context,
 	token string,
 	queryFirst, queryNext string,
 	baseVars map[string]any,
-	extract func(json.RawMessage) (pageResult, error),
-) ([]json.RawMessage, error) {
-	var pages []json.RawMessage
+	extract func(json.RawMessage) (cursor string, batch []T, err error),
+) ([]T, error) {
+	var all []T
 	var cursor string
 	first := true
 
@@ -49,17 +53,17 @@ func allPages(
 			return nil, err
 		}
 
-		pr, err := extract(data)
+		next, batch, err := extract(data)
 		if err != nil {
 			return nil, err
 		}
-		pages = append(pages, pr.data)
-		cursor = pr.cursor
+		all = append(all, batch...)
+		cursor = next
 		if cursor == "" {
 			break
 		}
 	}
-	return pages, nil
+	return all, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -69,7 +73,7 @@ func allPages(
 func GetHubs(ctx context.Context, token string) ([]NavItem, error) {
 	const qFirst = `
 		query GetHubs {
-			hubs(pagination: { limit: 50 }) {
+			hubs(pagination: { limit: 200 }) {
 				pagination { cursor }
 				results {
 					id name fusionWebUrl
@@ -79,7 +83,7 @@ func GetHubs(ctx context.Context, token string) ([]NavItem, error) {
 		}`
 	const qNext = `
 		query GetHubsNext($cursor: String!) {
-			hubs(pagination: { cursor: $cursor, limit: 50 }) {
+			hubs(pagination: { cursor: $cursor, limit: 200 }) {
 				pagination { cursor }
 				results {
 					id name fusionWebUrl
@@ -89,38 +93,30 @@ func GetHubs(ctx context.Context, token string) ([]NavItem, error) {
 		}`
 
 	type hubResult struct {
-		ID           string `json:"id"`
-		Name         string `json:"name"`
-		FusionWebURL string `json:"fusionWebUrl"`
+		ID                     string `json:"id"`
+		Name                   string `json:"name"`
+		FusionWebURL           string `json:"fusionWebUrl"`
 		AlternativeIdentifiers struct {
 			DataManagementAPIHubID string `json:"dataManagementAPIHubId"`
 		} `json:"alternativeIdentifiers"`
 	}
 
-	pages, err := allPages(ctx, token, qFirst, qNext, nil, func(data json.RawMessage) (pageResult, error) {
+	all, err := allPages(ctx, token, qFirst, qNext, nil, func(data json.RawMessage) (string, []hubResult, error) {
 		var r struct {
 			Hubs struct {
-				Pagination struct{ Cursor string `json:"cursor"` } `json:"pagination"`
-				Results    []hubResult                             `json:"results"`
+				Pagination struct {
+					Cursor string `json:"cursor"`
+				} `json:"pagination"`
+				Results []hubResult `json:"results"`
 			} `json:"hubs"`
 		}
 		if err := json.Unmarshal(data, &r); err != nil {
-			return pageResult{}, fmt.Errorf("hubs: %w", err)
+			return "", nil, fmt.Errorf("hubs: %w", err)
 		}
-		raw, _ := json.Marshal(r.Hubs.Results)
-		return pageResult{cursor: r.Hubs.Pagination.Cursor, data: raw}, nil
+		return r.Hubs.Pagination.Cursor, r.Hubs.Results, nil
 	})
 	if err != nil {
 		return nil, err
-	}
-
-	var all []hubResult
-	for _, p := range pages {
-		var batch []hubResult
-		if err := json.Unmarshal(p, &batch); err != nil {
-			return nil, err
-		}
-		all = append(all, batch...)
 	}
 
 	items := make([]NavItem, len(all))
@@ -145,7 +141,7 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetProjects($hubId: ID!) {
 			hub(hubId: $hubId) {
-				projects(pagination: { limit: 50 }) {
+				projects(pagination: { limit: 200 }) {
 					pagination { cursor }
 					results {
 						id name fusionWebUrl projectStatus projectType
@@ -157,7 +153,7 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 	const qNext = `
 		query GetProjectsNext($hubId: ID!, $cursor: String!) {
 			hub(hubId: $hubId) {
-				projects(pagination: { cursor: $cursor, limit: 50 }) {
+				projects(pagination: { cursor: $cursor, limit: 200 }) {
 					pagination { cursor }
 					results {
 						id name fusionWebUrl projectStatus projectType
@@ -168,45 +164,37 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 		}`
 
 	type projectResult struct {
-		ID            string `json:"id"`
-		Name          string `json:"name"`
-		FusionWebURL  string `json:"fusionWebUrl"`
-		ProjectStatus string `json:"projectStatus"`
-		ProjectType   string `json:"projectType"`
+		ID                     string `json:"id"`
+		Name                   string `json:"name"`
+		FusionWebURL           string `json:"fusionWebUrl"`
+		ProjectStatus          string `json:"projectStatus"`
+		ProjectType            string `json:"projectType"`
 		AlternativeIdentifiers struct {
 			DataManagementAPIProjectID string `json:"dataManagementAPIProjectId"`
 		} `json:"alternativeIdentifiers"`
 	}
 
-	pages, err := allPages(ctx, token, qFirst, qNext, map[string]any{"hubId": hubID}, func(data json.RawMessage) (pageResult, error) {
+	all, err := allPages(ctx, token, qFirst, qNext, map[string]any{"hubId": hubID}, func(data json.RawMessage) (string, []projectResult, error) {
 		var r struct {
 			Hub struct {
 				Projects struct {
-					Pagination struct{ Cursor string `json:"cursor"` } `json:"pagination"`
-					Results    []projectResult                         `json:"results"`
+					Pagination struct {
+						Cursor string `json:"cursor"`
+					} `json:"pagination"`
+					Results []projectResult `json:"results"`
 				} `json:"projects"`
 			} `json:"hub"`
 		}
 		if err := json.Unmarshal(data, &r); err != nil {
-			return pageResult{}, fmt.Errorf("projects: %w", err)
+			return "", nil, fmt.Errorf("projects: %w", err)
 		}
-		raw, _ := json.Marshal(r.Hub.Projects.Results)
-		return pageResult{cursor: r.Hub.Projects.Pagination.Cursor, data: raw}, nil
+		return r.Hub.Projects.Pagination.Cursor, r.Hub.Projects.Results, nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	var all []projectResult
-	for _, p := range pages {
-		var batch []projectResult
-		if err := json.Unmarshal(p, &batch); err != nil {
-			return nil, err
-		}
-		all = append(all, batch...)
-	}
-
-	var items []NavItem
+	items := make([]NavItem, 0, len(all))
 	for _, p := range all {
 		if strings.EqualFold(p.ProjectStatus, "inactive") {
 			continue
@@ -230,14 +218,14 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 func GetFolders(ctx context.Context, token, projectID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetFolders($projectId: ID!) {
-			foldersByProject(projectId: $projectId, pagination: { limit: 50 }) {
+			foldersByProject(projectId: $projectId, pagination: { limit: 200 }) {
 				pagination { cursor }
 				results { id name }
 			}
 		}`
 	const qNext = `
 		query GetFoldersNext($projectId: ID!, $cursor: String!) {
-			foldersByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 50 }) {
+			foldersByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 200 }) {
 				pagination { cursor }
 				results { id name }
 			}
@@ -248,30 +236,22 @@ func GetFolders(ctx context.Context, token, projectID string) ([]NavItem, error)
 		Name string `json:"name"`
 	}
 
-	pages, err := allPages(ctx, token, qFirst, qNext, map[string]any{"projectId": projectID}, func(data json.RawMessage) (pageResult, error) {
+	all, err := allPages(ctx, token, qFirst, qNext, map[string]any{"projectId": projectID}, func(data json.RawMessage) (string, []folderResult, error) {
 		var r struct {
 			FoldersByProject struct {
-				Pagination struct{ Cursor string `json:"cursor"` } `json:"pagination"`
-				Results    []folderResult                         `json:"results"`
+				Pagination struct {
+					Cursor string `json:"cursor"`
+				} `json:"pagination"`
+				Results []folderResult `json:"results"`
 			} `json:"foldersByProject"`
 		}
 		if err := json.Unmarshal(data, &r); err != nil {
-			return pageResult{}, fmt.Errorf("folders: %w", err)
+			return "", nil, fmt.Errorf("folders: %w", err)
 		}
-		raw, _ := json.Marshal(r.FoldersByProject.Results)
-		return pageResult{cursor: r.FoldersByProject.Pagination.Cursor, data: raw}, nil
+		return r.FoldersByProject.Pagination.Cursor, r.FoldersByProject.Results, nil
 	})
 	if err != nil {
 		return nil, err
-	}
-
-	var all []folderResult
-	for _, p := range pages {
-		var batch []folderResult
-		if err := json.Unmarshal(p, &batch); err != nil {
-			return nil, err
-		}
-		all = append(all, batch...)
 	}
 
 	items := make([]NavItem, len(all))
@@ -288,14 +268,14 @@ func GetFolders(ctx context.Context, token, projectID string) ([]NavItem, error)
 func GetProjectItems(ctx context.Context, token, projectID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetProjectItems($projectId: ID!) {
-			itemsByProject(projectId: $projectId, pagination: { limit: 50 }) {
+			itemsByProject(projectId: $projectId, pagination: { limit: 200 }) {
 				pagination { cursor }
 				results { __typename id name }
 			}
 		}`
 	const qNext = `
 		query GetProjectItemsNext($projectId: ID!, $cursor: String!) {
-			itemsByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 50 }) {
+			itemsByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 200 }) {
 				pagination { cursor }
 				results { __typename id name }
 			}
@@ -307,30 +287,22 @@ func GetProjectItems(ctx context.Context, token, projectID string) ([]NavItem, e
 		Name     string `json:"name"`
 	}
 
-	pages, err := allPages(ctx, token, qFirst, qNext, map[string]any{"projectId": projectID}, func(data json.RawMessage) (pageResult, error) {
+	all, err := allPages(ctx, token, qFirst, qNext, map[string]any{"projectId": projectID}, func(data json.RawMessage) (string, []itemResult, error) {
 		var r struct {
 			ItemsByProject struct {
-				Pagination struct{ Cursor string `json:"cursor"` } `json:"pagination"`
-				Results    []itemResult                           `json:"results"`
+				Pagination struct {
+					Cursor string `json:"cursor"`
+				} `json:"pagination"`
+				Results []itemResult `json:"results"`
 			} `json:"itemsByProject"`
 		}
 		if err := json.Unmarshal(data, &r); err != nil {
-			return pageResult{}, fmt.Errorf("project items: %w", err)
+			return "", nil, fmt.Errorf("project items: %w", err)
 		}
-		raw, _ := json.Marshal(r.ItemsByProject.Results)
-		return pageResult{cursor: r.ItemsByProject.Pagination.Cursor, data: raw}, nil
+		return r.ItemsByProject.Pagination.Cursor, r.ItemsByProject.Results, nil
 	})
 	if err != nil {
 		return nil, err
-	}
-
-	var all []itemResult
-	for _, p := range pages {
-		var batch []itemResult
-		if err := json.Unmarshal(p, &batch); err != nil {
-			return nil, err
-		}
-		all = append(all, batch...)
 	}
 
 	items := make([]NavItem, len(all))
@@ -347,14 +319,14 @@ func GetProjectItems(ctx context.Context, token, projectID string) ([]NavItem, e
 func GetItems(ctx context.Context, token, hubID, folderID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetItems($hubId: ID!, $folderId: ID!) {
-			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { limit: 50 }) {
+			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { limit: 200 }) {
 				pagination { cursor }
 				results { __typename id name }
 			}
 		}`
 	const qNext = `
 		query GetItemsNext($hubId: ID!, $folderId: ID!, $cursor: String!) {
-			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { cursor: $cursor, limit: 50 }) {
+			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { cursor: $cursor, limit: 200 }) {
 				pagination { cursor }
 				results { __typename id name }
 			}
@@ -366,30 +338,22 @@ func GetItems(ctx context.Context, token, hubID, folderID string) ([]NavItem, er
 		Name     string `json:"name"`
 	}
 
-	pages, err := allPages(ctx, token, qFirst, qNext, map[string]any{"hubId": hubID, "folderId": folderID}, func(data json.RawMessage) (pageResult, error) {
+	all, err := allPages(ctx, token, qFirst, qNext, map[string]any{"hubId": hubID, "folderId": folderID}, func(data json.RawMessage) (string, []itemResult, error) {
 		var r struct {
 			ItemsByFolder struct {
-				Pagination struct{ Cursor string `json:"cursor"` } `json:"pagination"`
-				Results    []itemResult                          `json:"results"`
+				Pagination struct {
+					Cursor string `json:"cursor"`
+				} `json:"pagination"`
+				Results []itemResult `json:"results"`
 			} `json:"itemsByFolder"`
 		}
 		if err := json.Unmarshal(data, &r); err != nil {
-			return pageResult{}, fmt.Errorf("items: %w", err)
+			return "", nil, fmt.Errorf("items: %w", err)
 		}
-		raw, _ := json.Marshal(r.ItemsByFolder.Results)
-		return pageResult{cursor: r.ItemsByFolder.Pagination.Cursor, data: raw}, nil
+		return r.ItemsByFolder.Pagination.Cursor, r.ItemsByFolder.Results, nil
 	})
 	if err != nil {
 		return nil, err
-	}
-
-	var all []itemResult
-	for _, p := range pages {
-		var batch []itemResult
-		if err := json.Unmarshal(p, &batch); err != nil {
-			return nil, err
-		}
-		all = append(all, batch...)
 	}
 
 	items := make([]NavItem, len(all))

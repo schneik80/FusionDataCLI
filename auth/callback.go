@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"time"
 )
 
 const (
@@ -52,7 +53,11 @@ func WaitForCallback(ctx context.Context) (string, error) {
 			}
 		}
 	}()
-	defer srv.Shutdown(context.Background()) //nolint:errcheck
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
 
 	select {
 	case code := <-codeCh:

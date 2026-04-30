@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const graphqlEndpoint = "https://developer.api.autodesk.com/mfg/graphql"
@@ -15,6 +17,26 @@ const graphqlEndpoint = "https://developer.api.autodesk.com/mfg/graphql"
 // region is the X-Ads-Region header value sent with every request.
 // Empty means no header is sent (defaults to US on the server side).
 var region string
+
+// httpClient is the shared HTTP client used for every APS request.
+// A single client with a tuned transport keeps connections alive across
+// pagination and rapid navigation; per-call timeouts come from the caller's
+// context (so streaming downloads aren't capped by a global Client.Timeout).
+var httpClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          16,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+}
 
 // SetRegion configures the ADS region header (e.g. "EMEA", "AUS").
 // Call this once at startup from the config; an empty string or "US" sends no header.
@@ -65,7 +87,7 @@ func gqlQuery(ctx context.Context, token, q string, vars map[string]any) (json.R
 		req.Header.Set("X-Ads-Region", region)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

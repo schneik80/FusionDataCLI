@@ -63,6 +63,10 @@ var themes = []colorTheme{
 
 var activeThemeIdx = 0
 
+// themeVersion is bumped each time applyTheme runs so caches keyed off the
+// active palette can detect staleness without snapshotting every Style.
+var themeVersion = 0
+
 // cycleTheme advances to the next theme, rebuilds all styles, and returns the
 // new theme name for display in the status bar.
 func cycleTheme() string {
@@ -100,6 +104,7 @@ var (
 )
 
 func applyTheme(t colorTheme) {
+	themeVersion++
 	colorAccent = t.accent
 	colorSubtle = t.subtle
 	colorMuted = t.muted

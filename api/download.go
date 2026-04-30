@@ -76,7 +76,7 @@ func DownloadFile(ctx context.Context, token, url, destPath string) error {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}

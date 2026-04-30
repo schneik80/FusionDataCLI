@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -130,6 +132,13 @@ type Model struct {
 	detailsLoading bool
 	details        *api.ItemDetails
 	detailsScroll  int
+	// detailsCache memoises GetItemDetails results by item ID for the
+	// lifetime of the session. Item details are immutable for a given ID
+	// (a save creates a new version with a new tip-version number, but the
+	// item ID is stable), so arrowing back over a previously-visited item
+	// can be served synchronously without an API call. Refresh ([r]) and
+	// hub re-selection clear the map to force a re-fetch.
+	detailsCache map[string]*api.ItemDetails
 
 	// About / debug overlay scroll
 	aboutScroll int
@@ -138,9 +147,12 @@ type Model struct {
 	// For column 2: when drilling into a subfolder, track the stack so we can go back.
 	folderStack []breadcrumbEntry
 
-	// IDs of the currently selected hub and project.
+	// IDs of the currently selected hub and project. selectedHubName is
+	// kept in sync with selectedHubID so we don't linear-scan m.hubs every
+	// time we build a breadcrumb or status message.
 	selectedHubID        string
 	selectedHubAltID     string
+	selectedHubNameCache string
 	selectedProjectAltID string
 
 	spinner      spinner.Model
@@ -149,6 +161,81 @@ type Model struct {
 	// True while a STEP translation request + download is in flight. Used
 	// to suppress concurrent [d] presses so multiple polls don't pile up.
 	downloadInProgress bool
+
+	// Render-time style cache. Lipgloss Styles are value types but their
+	// rules clone on each chained call (.Width(...).Foreground(...)). The
+	// browser View() runs at spinner rate (~10 Hz) and re-renders every
+	// visible row each frame, so we precompute width-applied styles here
+	// and rebuild only when the terminal size or theme changes. The cache
+	// is shared by pointer because Bubble Tea passes the Model by value
+	// to View(), so a local mutation on a copy would not persist.
+	styleCache *styleCache
+}
+
+// styleCache holds Width-applied variants of the per-row styles used in
+// renderColumn / viewDetailsColumn, plus the rendered detail-panel lines.
+// navWidth and detailsInner are tracked so the cache is invalidated on
+// resize; themeVersion bumps on cycleTheme.
+type styleCache struct {
+	navInner     int
+	detailsInner int
+	themeVersion int
+
+	columnTitleNav     lipgloss.Style
+	columnTitleDetails lipgloss.Style
+	columnTitleHeading lipgloss.Style // styleColumnTitle with MarginBottom(0)
+	itemSelectedNav    lipgloss.Style
+	itemSelectedAccent lipgloss.Style // cursor-on-inactive variant
+	itemNormalNav      lipgloss.Style
+	containerItemNav   lipgloss.Style
+	documentItemNav    lipgloss.Style
+	emptyNav           lipgloss.Style
+	itemDimDetails     lipgloss.Style
+
+	// Cached rendered detail lines for the current item. Keyed by the
+	// pointer identity of m.details and the inner width; rebuild when
+	// either changes (or on theme change, since rebuildStyleCache resets
+	// the styles backing these strings).
+	detailLinesPtr   *api.ItemDetails
+	detailLinesWidth int
+	detailLines      []string
+}
+
+// rebuild recomputes width-applied style variants. Called when the
+// terminal is resized or the theme is cycled. Also drops the rendered
+// detail-lines cache because it embeds styled strings produced from the
+// previous theme/width.
+func (sc *styleCache) rebuild(navInner, detailsInner int) {
+	sc.navInner = navInner
+	sc.detailsInner = detailsInner
+	sc.themeVersion = themeVersion
+	sc.columnTitleNav = styleColumnTitle.Width(navInner)
+	sc.columnTitleDetails = styleColumnTitle.Width(detailsInner)
+	sc.columnTitleHeading = styleColumnTitle.MarginBottom(0)
+	sc.itemSelectedNav = styleItemSelected.Width(navInner)
+	sc.itemSelectedAccent = styleItemNormal.Width(navInner).Foreground(colorAccent)
+	sc.itemNormalNav = styleItemNormal.Width(navInner)
+	sc.containerItemNav = styleContainerItem.Width(navInner)
+	sc.documentItemNav = styleDocumentItem.Width(navInner)
+	sc.emptyNav = styleEmpty.Width(navInner)
+	sc.itemDimDetails = styleItemDim.Width(detailsInner)
+	sc.detailLines = nil
+	sc.detailLinesPtr = nil
+	sc.detailLinesWidth = 0
+}
+
+// ensureStyleCache rebuilds the style cache if it's stale relative to the
+// requested widths or current theme. The cache pointer is created in New()
+// so all model copies share the same backing struct.
+func (m Model) ensureStyleCache(navInner, detailsInner int) *styleCache {
+	sc := m.styleCache
+	if sc.navInner == navInner &&
+		sc.detailsInner == detailsInner &&
+		sc.themeVersion == themeVersion {
+		return sc
+	}
+	sc.rebuild(navInner, detailsInner)
+	return sc
 }
 
 // New creates the initial model. cfgErr may be non-nil when the config file is
@@ -171,6 +258,8 @@ func New(cfg *config.Config, cfgErr error, version string) Model {
 			spinner:      sp,
 			version:      version,
 			mouseEnabled: true,
+			detailsCache: make(map[string]*api.ItemDetails),
+			styleCache:   &styleCache{},
 		}
 	}
 
@@ -181,6 +270,8 @@ func New(cfg *config.Config, cfgErr error, version string) Model {
 		spinner:      sp,
 		version:      version,
 		mouseEnabled: true,
+		detailsCache: make(map[string]*api.ItemDetails),
+		styleCache:   &styleCache{},
 	}
 }
 
@@ -233,9 +324,16 @@ func loginCmd(clientID, clientSecret string) tea.Cmd {
 	}
 }
 
+// navRequestTimeout bounds a single navigation GraphQL call. Generous enough
+// to cover slow networks + multi-page pagination, short enough that a hung
+// request doesn't leave the TUI frozen.
+const navRequestTimeout = 30 * time.Second
+
 func loadHubsCmd(token string) tea.Cmd {
 	return func() tea.Msg {
-		items, err := api.GetHubs(context.Background(), token)
+		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
+		defer cancel()
+		items, err := api.GetHubs(ctx, token)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -245,7 +343,9 @@ func loadHubsCmd(token string) tea.Cmd {
 
 func loadProjectsCmd(token, hubID string) tea.Cmd {
 	return func() tea.Msg {
-		items, err := api.GetProjects(context.Background(), token, hubID)
+		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
+		defer cancel()
+		items, err := api.GetProjects(ctx, token, hubID)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -255,16 +355,32 @@ func loadProjectsCmd(token, hubID string) tea.Cmd {
 
 // loadProjectContentsCmd loads the root contents of a project.
 // It fetches both top-level folders (foldersByProject) and project-level items
-// (itemsByProject) and merges them — folders first, then items.
+// (itemsByProject) concurrently and merges them — folders first, then items.
 func loadProjectContentsCmd(token, projectID string) tea.Cmd {
 	return func() tea.Msg {
-		folders, err := api.GetFolders(context.Background(), token, projectID)
-		if err != nil {
-			return errMsg{err}
+		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
+		defer cancel()
+
+		var (
+			folders, items []api.NavItem
+			fErr, iErr     error
+			wg             sync.WaitGroup
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			folders, fErr = api.GetFolders(ctx, token, projectID)
+		}()
+		go func() {
+			defer wg.Done()
+			items, iErr = api.GetProjectItems(ctx, token, projectID)
+		}()
+		wg.Wait()
+		if fErr != nil {
+			return errMsg{fErr}
 		}
-		items, err := api.GetProjectItems(context.Background(), token, projectID)
-		if err != nil {
-			return errMsg{err}
+		if iErr != nil {
+			return errMsg{iErr}
 		}
 		combined := append(folders, items...)
 		return contentsLoadedMsg{combined}
@@ -273,7 +389,9 @@ func loadProjectContentsCmd(token, projectID string) tea.Cmd {
 
 func loadItemsCmd(token, hubID, folderID string) tea.Cmd {
 	return func() tea.Msg {
-		items, err := api.GetItems(context.Background(), token, hubID, folderID)
+		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
+		defer cancel()
+		items, err := api.GetItems(ctx, token, hubID, folderID)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -283,7 +401,9 @@ func loadItemsCmd(token, hubID, folderID string) tea.Cmd {
 
 func loadDetailsCmd(token, hubID, itemID string) tea.Cmd {
 	return func() tea.Msg {
-		d, err := api.GetItemDetails(context.Background(), token, hubID, itemID)
+		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
+		defer cancel()
+		d, err := api.GetItemDetails(ctx, token, hubID, itemID)
 		if err != nil {
 			return errMsg{err}
 		}
@@ -464,6 +584,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeCol = colProjects
 			m.selectedHubID = msg.items[0].ID
 			m.selectedHubAltID = msg.items[0].AltID
+			m.selectedHubNameCache = msg.items[0].Name
 			m.loading[colProjects] = true
 			return m, loadProjectsCmd(m.token, msg.items[0].ID)
 		}
@@ -487,11 +608,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cols[colContents] = msg.items
 		m.cursors[colContents] = 0
 		m.scrolls[colContents] = 0
-		// Auto-load details for the first item
+		// Auto-load details for the first item.
 		if len(msg.items) > 0 && !msg.items[0].IsContainer && m.selectedHubID != "" {
+			m.detailsScroll = 0
+			if cached, ok := m.detailsCache[msg.items[0].ID]; ok && cached != nil {
+				m.details = cached
+				m.detailsLoading = false
+				return m, nil
+			}
 			m.detailsLoading = true
 			m.details = nil
-			m.detailsScroll = 0
 			return m, loadDetailsCmd(m.token, m.selectedHubID, msg.items[0].ID)
 		}
 		m.details = nil
@@ -501,6 +627,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detailsLoading = false
 		m.details = msg.details
 		m.detailsScroll = 0
+		if msg.details != nil && msg.details.ID != "" {
+			m.detailsCache[msg.details.ID] = msg.details
+		}
 		return m, nil
 
 	case openedBrowserMsg:
@@ -937,11 +1066,8 @@ func (m Model) buildBreadcrumb(xOffset int) (string, []crumbHit) {
 		x += w
 	}
 
-	for _, h := range m.hubs {
-		if h.ID == m.selectedHubID {
-			addSeg(h.Name, "hub", 0, true)
-			break
-		}
+	if m.selectedHubNameCache != "" {
+		addSeg(m.selectedHubNameCache, "hub", 0, true)
 	}
 	if proj := m.selectedItem(colProjects); proj != nil {
 		addSeg(proj.Name, "project", 0, true)
@@ -1061,10 +1187,17 @@ func (m Model) navigateRight() (Model, tea.Cmd) {
 }
 
 // maybeLoadDetails loads details for the current item if it's a document.
+// If the item's details are already cached from a prior fetch this session,
+// they're served synchronously and no API call is made.
 func (m *Model) maybeLoadDetails() tea.Cmd {
 	item := m.selectedItem(m.activeCol)
 	if item == nil || item.IsContainer {
 		m.details = nil
+		m.detailsLoading = false
+		return nil
+	}
+	if cached, ok := m.detailsCache[item.ID]; ok && cached != nil {
+		m.details = cached
 		m.detailsLoading = false
 		return nil
 	}
@@ -1179,17 +1312,15 @@ func (m Model) downloadStep() (Model, tea.Cmd) {
 // or an empty string if nothing is selected. Used to build helpful error
 // messages when Fusion is on a different hub than the CLI.
 func (m Model) selectedHubName() string {
-	for _, h := range m.hubs {
-		if h.ID == m.selectedHubID {
-			return h.Name
-		}
-	}
-	return ""
+	return m.selectedHubNameCache
 }
 
 // openInViewer opens the web viewer for the currently selected design item.
-// refresh reloads the data for the active column.
+// refresh reloads the data for the active column. Refresh also drops the
+// item-details cache so subsequent navigations re-fetch (a user pressing
+// [r] expects fresh data, not whatever was last cached).
 func (m Model) refresh() (Model, tea.Cmd) {
+	m.detailsCache = make(map[string]*api.ItemDetails)
 	switch m.activeCol {
 	case colProjects:
 		if m.selectedHubID == "" {
@@ -1226,6 +1357,7 @@ func (m Model) selectHub() (Model, tea.Cmd) {
 	hub := m.hubs[m.hubCursor]
 	m.selectedHubID = hub.ID
 	m.selectedHubAltID = hub.AltID
+	m.selectedHubNameCache = hub.Name
 	m.state = stateBrowsing
 	m.activeCol = colProjects
 	m.cols[colProjects] = nil
@@ -1320,13 +1452,8 @@ func (m Model) viewHubSelect() string {
 
 	// Current selection indicator
 	current := ""
-	if m.selectedHubID != "" {
-		for _, h := range m.hubs {
-			if h.ID == m.selectedHubID {
-				current = styleItemDim.Render("  Current: " + h.Name)
-				break
-			}
-		}
+	if m.selectedHubNameCache != "" {
+		current = styleItemDim.Render("  Current: " + m.selectedHubNameCache)
 	}
 
 	visibleH := m.height - 5
@@ -1434,15 +1561,25 @@ func (m Model) viewDebug() string {
 	return lipgloss.JoinVertical(lipgloss.Left, header, sb.String(), footer)
 }
 
-func (m Model) viewAbout() string {
-	ver := m.version
-	if ver == "" {
-		ver = "dev"
-	}
+// aboutLinesCache holds the last-rendered About-screen content. It depends
+// only on the version string (constant per session) and the active theme,
+// so we rebuild it lazily when either changes — not every frame the
+// overlay is visible.
+var (
+	aboutLinesCache        []string
+	aboutLinesCacheVersion string
+	aboutLinesCacheTheme   int
+)
 
-	// Build scrollable content lines
+func renderAboutLines(version string) []string {
+	if aboutLinesCache != nil &&
+		aboutLinesCacheVersion == version &&
+		aboutLinesCacheTheme == themeVersion {
+		return aboutLinesCache
+	}
+	heading := styleColumnTitle.MarginBottom(0)
 	lines := []string{
-		styleHeader.Render("FusionDataCLI  v" + ver),
+		styleHeader.Render("FusionDataCLI  v" + version),
 		"",
 		styleItemNormal.Render("  A terminal browser for Autodesk Platform Services"),
 		styleItemNormal.Render("  Manufacturing Data Model — navigate Fusion hubs,"),
@@ -1450,10 +1587,10 @@ func (m Model) viewAbout() string {
 		"",
 		styleItemDim.Render("  https://github.com/schneik80/FusionDataCLI"),
 		"",
-		styleColumnTitle.MarginBottom(0).Render("Copyright:"),
+		heading.Render("Copyright:"),
 		styleItemNormal.Render("  © 2025 Kevin Schneider"),
 		"",
-		styleColumnTitle.MarginBottom(0).Render("License:"),
+		heading.Render("License:"),
 		styleItemNormal.Render("  GNU General Public License v3.0"),
 		"",
 		styleItemNormal.Render("  This program is free software: you can redistribute it"),
@@ -1472,7 +1609,7 @@ func (m Model) viewAbout() string {
 		styleItemNormal.Render("  License along with this program.  If not, see"),
 		styleItemNormal.Render("  <https://www.gnu.org/licenses/>."),
 		"",
-		styleColumnTitle.MarginBottom(0).Render("Open Source:"),
+		heading.Render("Open Source:"),
 		styleItemNormal.Render("  This application uses the following open source libraries:"),
 		"",
 		styleItemNormal.Render("  Charm.sh bubbletea"),
@@ -1487,7 +1624,7 @@ func (m Model) viewAbout() string {
 		styleItemDim.Render("    Terminal styling — github.com/charmbracelet/lipgloss"),
 		styleItemDim.Render("    MIT License — © Charmbracelet, Inc."),
 		"",
-		styleColumnTitle.MarginBottom(0).Render("Autodesk Platform Services:"),
+		heading.Render("Autodesk Platform Services:"),
 		styleItemNormal.Render("  Powered by the APS Manufacturing Data Model API."),
 		styleItemDim.Render("  Autodesk, Fusion, and related marks are trademarks of"),
 		styleItemDim.Render("  Autodesk, Inc. This application is not affiliated with or"),
@@ -1497,6 +1634,18 @@ func (m Model) viewAbout() string {
 		"",
 		styleItemDim.Render("  [↑↓/jk] scroll  [a] close"),
 	}
+	aboutLinesCache = lines
+	aboutLinesCacheVersion = version
+	aboutLinesCacheTheme = themeVersion
+	return lines
+}
+
+func (m Model) viewAbout() string {
+	ver := m.version
+	if ver == "" {
+		ver = "dev"
+	}
+	lines := renderAboutLines(ver)
 
 	// Scroll window
 	visibleH := m.height - 2
@@ -1560,6 +1709,7 @@ func (m Model) recoverFromError() (Model, tea.Cmd) {
 	m.hubLoading = false
 	m.selectedHubID = ""
 	m.selectedHubAltID = ""
+	m.selectedHubNameCache = ""
 	m.selectedProjectAltID = ""
 	m.folderStack = nil
 	m.cols = [numCols][]api.NavItem{}
@@ -1570,6 +1720,7 @@ func (m Model) recoverFromError() (Model, tea.Cmd) {
 	m.details = nil
 	m.detailsLoading = false
 	m.detailsScroll = 0
+	m.detailsCache = make(map[string]*api.ItemDetails)
 	m.statusMsg = ""
 	m.state = stateLoading
 	return m, tea.Batch(m.spinner.Tick, checkTokensCmd(m.clientID, m.clientSecret))
@@ -1604,6 +1755,10 @@ func fitFooterLine(help, version string, width int) string {
 // truncateDisplay trims a string to fit in at most maxWidth display columns,
 // appending an ellipsis when the input was actually truncated. Uses
 // lipgloss.Width so multi-byte glyphs are counted correctly.
+//
+// Implementation: a true binary search over the rune-length prefix that
+// fits with room for the trailing ellipsis. The previous one-rune-at-a-
+// time loop ran O(n) lipgloss.Width measurements; this runs O(log n).
 func truncateDisplay(s string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return ""
@@ -1615,15 +1770,20 @@ func truncateDisplay(s string, maxWidth int) string {
 		return "…"
 	}
 	runes := []rune(s)
-	// Binary-search-ish: trim runes until it fits with room for the ellipsis.
-	for len(runes) > 0 {
-		candidate := string(runes) + "…"
-		if lipgloss.Width(candidate) <= maxWidth {
-			return candidate
+	// Find the largest k such that lipgloss.Width(string(runes[:k]) + "…") ≤ maxWidth.
+	lo, hi := 0, len(runes)
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if lipgloss.Width(string(runes[:mid])+"…") <= maxWidth {
+			lo = mid
+		} else {
+			hi = mid - 1
 		}
-		runes = runes[:len(runes)-1]
 	}
-	return "…"
+	if lo == 0 {
+		return "…"
+	}
+	return string(runes[:lo]) + "…"
 }
 
 func (m Model) viewBrowser() string {
@@ -1642,12 +1802,21 @@ func (m Model) viewBrowser() string {
 	if colWidth < 10 {
 		colWidth = 10
 	}
+	navInner := colWidth - 4
+	if navInner < 4 {
+		navInner = 4
+	}
+	detailsInner := detailsWidth - 4
+	if detailsInner < 4 {
+		detailsInner = 4
+	}
+	sc := m.ensureStyleCache(navInner, detailsInner)
 	cols := make([]string, numCols)
 	titles := []string{"Projects", "Contents"}
 	for i := 0; i < numCols; i++ {
-		cols[i] = m.renderColumn(i, titles[i], colWidth, colHeight)
+		cols[i] = m.renderColumn(i, titles[i], colWidth, colHeight, sc)
 	}
-	detailsCol := m.viewDetailsColumn(detailsWidth, colHeight)
+	detailsCol := m.viewDetailsColumn(detailsWidth, colHeight, sc)
 	browserRow := lipgloss.JoinHorizontal(lipgloss.Top,
 		append(cols, detailsCol)...)
 
@@ -1694,16 +1863,13 @@ func (m Model) viewBrowser() string {
 	)
 }
 
-func (m Model) renderColumn(col int, title string, width, height int) string {
-	innerWidth := width - 4 // subtract border (2) + padding (2)
-	if innerWidth < 4 {
-		innerWidth = 4
-	}
+func (m Model) renderColumn(col int, title string, width, height int, sc *styleCache) string {
+	innerWidth := sc.navInner
 
 	var sb strings.Builder
 
 	// Title row
-	sb.WriteString(styleColumnTitle.Width(innerWidth).Render(title))
+	sb.WriteString(sc.columnTitleNav.Render(title))
 	sb.WriteString("\n")
 
 	// Loading indicator
@@ -1715,13 +1881,13 @@ func (m Model) renderColumn(col int, title string, width, height int) string {
 		if len(items) == 0 {
 			// Distinguish "never loaded" (nil) from "loaded but no content" (non-nil empty slice).
 			if col == colContents && items != nil {
-				sb.WriteString(styleEmpty.Width(innerWidth).Render("No designs found."))
+				sb.WriteString(sc.emptyNav.Render("No designs found."))
 				sb.WriteString("\n")
-				sb.WriteString(styleEmpty.Width(innerWidth).Render("Project may contain legacy"))
+				sb.WriteString(sc.emptyNav.Render("Project may contain legacy"))
 				sb.WriteString("\n")
-				sb.WriteString(styleEmpty.Width(innerWidth).Render("or non-Fusion content."))
+				sb.WriteString(sc.emptyNav.Render("or non-Fusion content."))
 			} else {
-				sb.WriteString(styleEmpty.Width(innerWidth).Render("(empty)"))
+				sb.WriteString(sc.emptyNav.Render("(empty)"))
 			}
 		} else {
 			visibleRows := height - 3 // title + bottom margin
@@ -1746,16 +1912,14 @@ func (m Model) renderColumn(col int, title string, width, height int) string {
 				var line string
 				switch {
 				case active && selected:
-					line = styleItemSelected.Width(innerWidth).Render(label)
+					line = sc.itemSelectedNav.Render(label)
 				case selected:
-					line = styleItemNormal.Width(innerWidth).
-						Foreground(colorAccent).
-						Render(label)
+					line = sc.itemSelectedAccent.Render(label)
 				default:
 					if item.IsContainer {
-						line = styleContainerItem.Width(innerWidth).Render(label)
+						line = sc.containerItemNav.Render(label)
 					} else {
-						line = styleDocumentItem.Width(innerWidth).Render(label)
+						line = sc.documentItemNav.Render(label)
 					}
 				}
 				sb.WriteString(line)
@@ -1786,14 +1950,11 @@ func (m Model) renderColumn(col int, title string, width, height int) string {
 // Details column
 // ---------------------------------------------------------------------------
 
-func (m Model) viewDetailsColumn(width, height int) string {
-	inner := width - 4
-	if inner < 4 {
-		inner = 4
-	}
+func (m Model) viewDetailsColumn(width, height int, sc *styleCache) string {
+	inner := sc.detailsInner
 
 	var sb strings.Builder
-	sb.WriteString(styleColumnTitle.Width(inner).Render("Details"))
+	sb.WriteString(sc.columnTitleDetails.Render("Details"))
 	sb.WriteString("\n")
 
 	// A document is "actionable" in Fusion when the details panel is
@@ -1823,11 +1984,11 @@ func (m Model) viewDetailsColumn(width, height int) string {
 		sb.WriteString(styleLoading.Render(" Loading…"))
 		usedLines = 1
 	} else if m.details == nil {
-		sb.WriteString(styleItemDim.Width(inner).Render("No item selected"))
+		sb.WriteString(sc.itemDimDetails.Render("No item selected"))
 		usedLines = 1
 	} else {
 		d := m.details
-		lines := buildDetailLines(d, inner)
+		lines := m.detailLines(d, inner, sc)
 		scroll := clamp(m.detailsScroll, 0, max(0, len(lines)-visibleH))
 		end := min(scroll+visibleH, len(lines))
 
@@ -1865,14 +2026,29 @@ func (m Model) viewDetailsColumn(width, height int) string {
 		if m.details.Typename == "DesignItem" {
 			hint += "  [d] step"
 		}
-		sb.WriteString(styleItemDim.Width(inner).Render(hint))
+		sb.WriteString(sc.itemDimDetails.Render(hint))
 	}
 
 	return styleColumnInactive.Width(width).Height(height).Render(sb.String())
 }
 
+// detailLines returns pre-rendered lines for the details panel, memoised on
+// the (details pointer, width, theme) tuple. Called from viewDetailsColumn
+// every frame; the cache means the actual rendering only runs when the
+// selected item, terminal width, or theme changes.
+func (m Model) detailLines(d *api.ItemDetails, width int, sc *styleCache) []string {
+	if sc.detailLinesPtr == d && sc.detailLinesWidth == width && sc.detailLines != nil {
+		return sc.detailLines
+	}
+	lines := buildDetailLines(d, width, sc)
+	sc.detailLines = lines
+	sc.detailLinesPtr = d
+	sc.detailLinesWidth = width
+	return lines
+}
+
 // buildDetailLines returns pre-rendered lines for the details panel.
-func buildDetailLines(d *api.ItemDetails, width int) []string {
+func buildDetailLines(d *api.ItemDetails, width int, sc *styleCache) []string {
 	label := func(k, v string) string {
 		if v == "" {
 			return ""
@@ -1881,7 +2057,7 @@ func buildDetailLines(d *api.ItemDetails, width int) []string {
 		return truncate(key+" "+v, width)
 	}
 	heading := func(s string) string {
-		return styleColumnTitle.MarginBottom(0).Render(s + ":")
+		return sc.columnTitleHeading.Render(s + ":")
 	}
 	var lines []string
 	add := func(s string) {
@@ -1964,8 +2140,8 @@ func formatSize(s string) string {
 	if s == "" {
 		return ""
 	}
-	var bytes int64
-	if _, err := fmt.Sscanf(s, "%d", &bytes); err != nil {
+	bytes, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
 		return s // not numeric; return as-is
 	}
 	switch {
@@ -2030,6 +2206,12 @@ func itemLabel(item api.NavItem, maxWidth int) string {
 func truncate(s string, max int) string {
 	if max <= 0 {
 		return ""
+	}
+	// Byte length is an upper bound on rune count: any string with len(s)
+	// bytes ≤ max can't have more than max runes, so we can skip the
+	// []rune allocation on the common no-truncation path.
+	if len(s) <= max {
+		return s
 	}
 	runes := []rune(s)
 	if len(runes) <= max {
