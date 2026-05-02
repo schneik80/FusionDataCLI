@@ -495,12 +495,12 @@ func pollStepCmdAfter(d time.Duration, token, cvid, name string) tea.Cmd {
 // downloadStepFileCmd streams the signed-URL response to a file under the
 // user's Downloads directory and returns a stepDoneMsg with the final path
 // (or any error encountered).
-func downloadStepFileCmd(token, signedURL, name string) tea.Cmd {
+func downloadStepFileCmd(signedURL, name string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		path := api.StepDownloadPath(name)
-		if err := api.DownloadFile(ctx, token, signedURL, path); err != nil {
+		if err := api.DownloadFile(ctx, signedURL, path); err != nil {
 			return stepDoneMsg{err: err}
 		}
 		return stepDoneMsg{path: path}
@@ -661,7 +661,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.status {
 		case api.StepStatusSuccess:
 			m.statusMsg = "Downloading STEP for " + msg.name + "…"
-			return m, downloadStepFileCmd(m.token, msg.signedURL, msg.name)
+			return m, downloadStepFileCmd(msg.signedURL, msg.name)
 		case api.StepStatusFailed:
 			m.downloadInProgress = false
 			m.statusMsg = "STEP translation failed for " + msg.name

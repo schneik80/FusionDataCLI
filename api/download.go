@@ -64,17 +64,17 @@ func RequestSTEPDerivative(ctx context.Context, token, componentVersionID string
 	return strings.ToUpper(d.Status), d.SignedURL, nil
 }
 
-// DownloadFile streams an HTTP GET response to destPath. The bearer token
-// is sent as Authorization header — APS signed URLs are pre-authenticated
-// but the canonical sample includes the header, and it is harmless to do
-// so here.
-func DownloadFile(ctx context.Context, token, url, destPath string) error {
+// DownloadFile streams an HTTP GET response to destPath. APS signed URLs
+// are self-authenticated (the signature is embedded in the URL itself), so
+// the user's bearer token is intentionally NOT attached to this request.
+// If a poisoned or MITM'd GraphQL response ever returned a non-Autodesk
+// URL, sending the bearer would leak the user's APS access token to the
+// attacker — withholding it confines the blast radius to the (already
+// untrusted) signed URL itself.
+func DownloadFile(ctx context.Context, url, destPath string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
