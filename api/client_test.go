@@ -3,9 +3,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/schneik80/FusionDataCLI/internal/testutil"
 )
@@ -132,6 +136,63 @@ func TestGqlQuery_EmptyData_Errors(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "empty") {
 		t.Errorf("error = %q, want substring \"empty\"", err.Error())
+	}
+}
+
+func TestGqlQuery_RetriesOnUnknownErrorType(t *testing.T) {
+	// Temporarily collapse the retry backoffs so the test runs instantly.
+	prev := retryBackoffs
+	retryBackoffs = []time.Duration{0, 1 * time.Millisecond, 1 * time.Millisecond}
+	t.Cleanup(func() { retryBackoffs = prev })
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if n < 3 {
+			// First two attempts: the APS gateway's flaky-NOT_FOUND shape.
+			_, _ = io.WriteString(w, `{"data":{"hub":{"projects":null}},"errors":[{"message":"Requested resource not found.","extensions":{"code":"NOT_FOUND","errorType":"UNKNOWN"}}]}`)
+			return
+		}
+		// Third attempt: success.
+		_, _ = io.WriteString(w, `{"data":{"x":1}}`)
+	}))
+	t.Cleanup(srv.Close)
+	swapEndpoint(t, srv.URL)
+
+	raw, err := gqlQuery(context.Background(), "tok", "query Q {}", nil)
+	if err != nil {
+		t.Fatalf("gqlQuery: expected success after retry, got %v", err)
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("call count = %d, want 3 (1 initial + 2 retries)", got)
+	}
+	var got map[string]int
+	if err := json.Unmarshal(raw, &got); err != nil || got["x"] != 1 {
+		t.Errorf("decoded data = %v err=%v, want {x:1}", got, err)
+	}
+}
+
+func TestGqlQuery_NoRetryOnConcreteError(t *testing.T) {
+	// errorType not "UNKNOWN" → must not retry.
+	prev := retryBackoffs
+	retryBackoffs = []time.Duration{0, 1 * time.Millisecond, 1 * time.Millisecond}
+	t.Cleanup(func() { retryBackoffs = prev })
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"errors":[{"message":"bad input","extensions":{"code":"BAD_USER_INPUT","errorType":"VALIDATION"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	swapEndpoint(t, srv.URL)
+
+	if _, err := gqlQuery(context.Background(), "tok", "query Q {}", nil); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("call count = %d, want 1 (no retries on concrete error)", got)
 	}
 }
 

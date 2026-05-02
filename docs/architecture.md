@@ -134,6 +134,7 @@ sequenceDiagram
     Update->>Update: navigateRight()
     Update->>Cmd: loadItemsCmd(token, hubID, folderID)
     Cmd->>API: GetItems(ctx, token, hubID, folderID)
+    Note over API: gqlQuery: up to 3 attempts<br/>retry on errorType:UNKNOWN<br/>or HTTP 408/429/5xx
     API->>APS: POST /mfg/graphql
     APS-->>API: JSON response
     API-->>Cmd: []NavItem
@@ -152,6 +153,19 @@ The browser View() runs at spinner rate (~10 Hz) and re-renders every visible ro
 - **`detailsCache map[string]*api.ItemDetails`** — `GetItemDetails` results are memoised by item ID for the lifetime of the session. Item details are immutable for a given ID (a save creates a new version with a new tip-version number, but the item ID is stable), so arrowing back over a previously-visited item is served synchronously without an API call. Refresh (`r`) and hub re-selection clear the map to force re-fetch.
 - **`styleCache`** — Lipgloss styles are value types but their rules clone on each chained `.Width(...).Foreground(...)` call. The width-applied variants used in `renderColumn` / `viewDetailsColumn` are precomputed and rebuilt only when terminal size or theme changes. The cache is shared by pointer because Bubble Tea passes the Model by value to View(); a local mutation on a copy would not persist. The rendered detail-panel lines are also cached and keyed on `m.details`'s pointer + width + theme version.
 - **Parallel project-contents fetch** — `loadProjectContentsCmd` issues `foldersByProject` and `itemsByProject` concurrently via `sync.WaitGroup` rather than sequentially. Wall-clock latency drops to roughly the slower of the two queries.
+
+---
+
+## Resilience — APS gateway flakiness
+
+The APS Manufacturing Data Model GraphQL gateway (`/mfg/graphql`) intermittently returns `code:NOT_FOUND, errorType:UNKNOWN` for hub URNs it just successfully enumerated via the `hubs` query — the same access token, same hub ID, and same query body succeed and fail within seconds. The failure can occur on the very first paginated request (no cursor involved), so it is not a cursor-encoding issue, and reproduces against both the shared `*http.Client` and `http.DefaultClient`, so it is not a connection-state issue.
+
+`gqlQuery` (in `api/client.go`) wraps a single-shot `gqlQueryOnce` in a 3-attempt retry loop with backoffs `0 → 500 ms → 1.5 s`. Retry triggers are narrow:
+
+- Transport errors and HTTP `408` / `429` / `5xx` (server / network).
+- GraphQL `errors[]` carrying `extensions.errorType: "UNKNOWN"` (gateway's marker for intermittent upstream faults).
+
+HTTP `401` and concrete-typed GraphQL errors (`VALIDATION`, `BAD_USER_INPUT`, etc.) are surfaced immediately without retry. Total worst-case added latency is ~2 s, well inside the 30 s context that wraps every nav `tea.Cmd`. See [`docs/api.md`](api.md#error-handling-and-retry) for the decision-tree diagram. The full repro trace and defect-report template live outside the repo at `~/Documents/aps-mfg-graphql-flakiness.md` for filing with APS.
 
 ---
 
@@ -215,11 +229,11 @@ FusionDataCLI/
 │   └── tokens.go            LoadTokens(), SaveTokens(), TokenData.Valid()
 │
 ├── api/
-│   ├── client.go            gqlQuery(), NavItem, SetRegion(), SetGraphqlEndpointForTesting()
+│   ├── client.go            gqlQuery() retry loop + gqlQueryOnce(), NavItem, SetRegion(), SetGraphqlEndpointForTesting()
 │   ├── queries.go           GetHubs/Projects/Folders/Items; allPages() pagination
 │   ├── details.go           GetItemDetails(), ItemDetails, VersionSummary, parseTime()
 │   ├── download.go          RequestSTEPDerivative(), DownloadFile(), StepDownloadPath()
-│   └── debug.go             dbgLog(), DebugLines(), DebugEnabled()
+│   └── debug.go             dbgLog() (in-memory ring + stderr mirror), DebugLines(), DebugEnabled()
 │
 ├── fusion/
 │   └── mcp.go               Fusion desktop MCP client (open / insert document)

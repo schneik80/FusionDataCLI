@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"time"
 )
@@ -48,6 +49,9 @@ func dbgLog(format string, args ...any) {
 	if len(dbgLines) > maxDebugLines {
 		dbgLines = dbgLines[len(dbgLines)-maxDebugLines:]
 	}
+	// Mirror to stderr so users can `2> file.log` to capture without
+	// scrolling the in-app overlay (which is unreachable from stateError).
+	fmt.Fprintln(os.Stderr, line)
 }
 
 // DebugLog appends a formatted line to the shared debug log. Intended for

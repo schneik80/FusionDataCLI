@@ -23,11 +23,11 @@ The `X-Ads-Region` header is only sent when a non-default region is configured. 
 flowchart TD
     caller["Caller\n(ui package)"] --> fn["GetHubs / GetProjects\n/ GetFolders / GetItems\n/ GetItemDetails"]
     fn --> ap["allPages()\npagination loop"]
-    ap --> gql["gqlQuery()\nHTTP POST + JSON decode"]
-    gql --> http["net/http\nPOST /mfg/graphql"]
-    gql --> debug["dbgLog()\noptional request/response dump"]
+    ap --> gql["gqlQuery()\nretry loop\n(0 → 500ms → 1.5s)"]
+    gql --> once["gqlQueryOnce()\nsingle HTTP round-trip\n+ JSON decode"]
+    once --> http["net/http\nPOST /mfg/graphql"]
+    once --> debug["dbgLog()\noptional request/response dump\n(also mirrored to stderr)"]
     ap --> extract["extract() callback\npage-specific JSON unmarshal"]
-    ap --> merge["Merge pages\ninto []json.RawMessage"]
     fn --> navItem["navItemFromTypename()\ntype → NavItem.Kind"]
 ```
 
@@ -407,21 +407,56 @@ time.Parse("2006-01-02T15:04:05.000Z", s)   // "2026-03-15T14:30:00.000Z"
 
 ---
 
-## Error Handling
+## Error Handling and Retry
 
-GraphQL errors are returned in a top-level `errors` array alongside `data`. The client collects all error messages and joins them with `"; "`:
+GraphQL errors are returned in a top-level `errors` array alongside `data`. Each error carries `extensions.code`, `extensions.errorType`, and `extensions.correlation_id`. The client collects all error messages and joins them with `"; "`:
 
 ```json
 {
   "errors": [
-    { "message": "internal server error" }
+    {
+      "message": "Requested resource not found.",
+      "extensions": {
+        "code": "NOT_FOUND",
+        "errorType": "UNKNOWN",
+        "service": "cw",
+        "correlation_id": "..."
+      }
+    }
   ]
 }
 ```
 
-HTTP-level errors (non-2xx) are returned directly:
+**HTTP-level errors:**
 - `401 Unauthorized` → short-circuited before body parsing; surfaced as `"unauthorized (HTTP 401) — token may be expired or lacks scope/entitlement; body: <raw>"`. Bypassing the JSON decode avoids spurious "parsing GraphQL response" errors when APS returns a non-JSON 401 body.
-- Other 4xx/5xx → response body is parsed; GraphQL `errors` are surfaced if present, otherwise the raw bytes are returned.
+- `408 / 429 / 5xx` → retried (see below).
+- Other 4xx → response body parsed and surfaced verbatim, no retry.
+
+### Bounded retry on transient APS gateway flakiness
+
+The MFG GraphQL gateway intermittently returns `code:NOT_FOUND, errorType:UNKNOWN` for hub URNs it just successfully enumerated via the `hubs` query. The same query body, same access token, and same hub URN succeeds and fails within seconds. Repro details and a defect-report template are kept outside the repo at `~/Documents/aps-mfg-graphql-flakiness.md` so anyone can pick it up to file with APS.
+
+`gqlQuery` wraps `gqlQueryOnce` in a 3-attempt retry loop with bounded backoffs `0 → 500 ms → 1.5 s` (max ~2 s added latency, well inside the 30 s nav-cmd context). The retry decision:
+
+```mermaid
+flowchart TD
+    A[gqlQueryOnce returns] --> B{error?}
+    B -- no --> OK([return data])
+    B -- yes --> C{transport error<br/>or HTTP 408/429/5xx?}
+    C -- yes --> RETRY[retry with backoff]
+    C -- no --> D{HTTP 401?}
+    D -- yes --> FAIL([surface, no retry])
+    D -- no --> E{GraphQL errors[]<br/>contain errorType:UNKNOWN?}
+    E -- yes --> RETRY
+    E -- no --> FAIL
+    RETRY --> F{attempts left?}
+    F -- yes --> A
+    F -- no --> FINAL([surface 'flaky after N attempts'])
+```
+
+Concrete `errorType` values (`VALIDATION`, `BAD_USER_INPUT`, etc.) and HTTP 401 are **never** retried — those are real errors. Only the gateway's `UNKNOWN` marker and transport/server-side faults trigger a retry.
+
+If the call is still failing after 3 attempts, the wrapped error reads `APS GraphQL flaky after 3 attempts: <last error>` so the symptom is distinguishable from a one-shot failure when reading logs.
 
 ---
 
@@ -430,15 +465,19 @@ HTTP-level errors (non-2xx) are returned directly:
 Set `APSNAV_DEBUG=1` before running to enable full request/response logging:
 
 ```sh
-APSNAV_DEBUG=1 fusiondatacli
+APSNAV_DEBUG=1 fusiondatacli            # in-app overlay only
+APSNAV_DEBUG=1 fusiondatacli 2> log     # also captured to file via stderr
 ```
 
-Logs are stored in memory (rolling buffer, max 500 lines) and displayed via the `?` overlay in the browser. Each entry includes:
+Logs are stored in memory (rolling buffer, max 500 lines) and displayed via the `?` overlay from `stateBrowsing`. Each entry is **also mirrored to stderr** when debug is enabled, so the log can be captured to a file even when the in-app overlay is unreachable (e.g. from `stateError`). BubbleTea uses the alternate screen buffer, so stderr writes do not smear the TUI.
+
+Each log entry includes:
 - Query name and variables
 - HTTP status code
 - Raw JSON response body
+- `RETRY attempt=N delay=… lastErr=…` lines whenever the bounded-retry loop kicks in
 
-Debug logs are **not** written to disk and do not include Authorization header values.
+Debug logs are **not** written to disk by the app itself, and do not include Authorization header values.
 
 ---
 
