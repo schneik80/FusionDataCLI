@@ -1,5 +1,7 @@
 # FusionDataCLI
 
+[![test](https://github.com/schneik80/FusionDataCLI/actions/workflows/test.yml/badge.svg)](https://github.com/schneik80/FusionDataCLI/actions/workflows/test.yml)
+
 A terminal browser for [Autodesk Platform Services (APS)](https://aps.autodesk.com) Manufacturing Data Model. Navigate your Fusion hubs, projects, folders, and designs from the command line.
 
 ![FusionDataCLI screenshot](./docs/screenshot.png)
@@ -48,11 +50,12 @@ On first run the app opens your browser for Autodesk sign-in. After authenticati
 |-----|--------|
 | `↑` `↓` / `j` `k` | Move cursor |
 | `→` `↵` / `l` | Enter folder / open details |
-| `←` / `h` | Go back |
+| `←` | Go back |
+| `h` | Switch hub (re-open the hub picker) |
 | `o` | Open selected document in browser (only after details have loaded) |
 | `f` | Open in Fusion desktop (via Fusion MCP) |
 | `i` | Insert into active Fusion design (via Fusion MCP) |
-| `d` | Toggle details panel |
+| `d` | Download STEP file for the selected design |
 | `t` | Cycle color theme |
 | `m` | Toggle mouse support on/off |
 | `a` | About / license |
@@ -79,6 +82,18 @@ The `o` key opens the selected document in your default browser using the item-l
 The earlier hand-constructed fallback URLs (`https://autodesk360.com/g/projects/...`, `https://acc.autodesk.com/docs/files/projects/...`) have been removed — those patterns are rejected by Autodesk's team web app with a raw JSON `BROWSER_LOGIN_REQUIRED` error on team hubs. Only the per-item permalink from the Data Model API is trusted now.
 
 The full URL passed to the OS browser handler is shown in the status bar so it can be inspected or copied.
+
+### STEP download
+
+Press `d` on a selected design (after the details panel has finished loading) to export it to STEP. The CLI requests a STEP derivative from the APS Manufacturing Data Model (`componentVersion(...).derivatives(outputFormat: STEP, generate: true)`), polls every two seconds until status is `SUCCESS` or `FAILED`, and then streams the signed-URL response to:
+
+```
+~/Downloads/<design-name>-<YYYYMMDD-HHMMSS>.stp
+```
+
+If the home directory cannot be determined the file is written to `os.TempDir()` instead. Filenames are sanitised to a safe whitelist (alphanumerics, dash, underscore, space, dot) so cross-platform paths always round-trip cleanly.
+
+`d` is only valid on `DesignItem` rows that have a `tipRootComponentVersion` — drawings (`DrawingItem`), configured designs (`ConfiguredDesignItem`), folders, and projects are not supported by the derivatives endpoint. Pressing `d` on those rows is a no-op with a status-bar hint. A second `d` press while a download is already in flight is also rejected so polls don't pile up.
 
 ### Non-US hubs
 
@@ -132,6 +147,16 @@ make build
 make dev
 APS_CLIENT_ID=your-client-id ./fusiondatacli
 ```
+
+## Development
+
+See [`docs/development.md`](docs/development.md) for the full guide — APS app registration, configuration layering, project structure, debug mode, dependencies, and the goreleaser + macOS `.pkg` release pipeline.
+
+```sh
+make check       # go vet ./... + go test -race ./...
+```
+
+`make check` runs the same vet + race-tested suite that CI runs on every pull request and push to `main` (`.github/workflows/test.yml`). The full suite finishes in under five seconds.
 
 ## License
 

@@ -133,7 +133,7 @@ The callback server (`auth/callback.go`) is a minimal HTTP server:
 ```mermaid
 sequenceDiagram
     participant Browser
-    participant Server as localhost:7879
+    participant Server as 127.0.0.1:7879
     participant App
 
     Server->>App: Start (channel created)
@@ -143,10 +143,10 @@ sequenceDiagram
     Server->>Server: Shut down after first request
 ```
 
-- Listens only on loopback (`localhost`) — never accessible from the network
+- **Binds explicitly to `127.0.0.1`** (loopback only) via `net.Listen("tcp", "127.0.0.1:7879")`. Never accessible from the network — no other process on the LAN can intercept the auth code, even on a misconfigured firewall. (Earlier versions bound to all interfaces; that was tightened as security finding **H1**.)
 - Shuts down after receiving the first valid callback
 - Returns a human-readable HTML page so the browser tab shows a clear success state
-- Error responses from APS (`?error=access_denied`) are surfaced to the user
+- Error responses from APS (`?error=access_denied&error_description=…`) are surfaced to the user. The reflected `error` and `error_description` query parameters are **HTML-escaped** with `html.EscapeString` before being written into the response page (XSS defense — without escaping, a malicious authorize-URL crafter could inject script into the page that runs in the browser).
 
 ---
 
@@ -172,3 +172,25 @@ The file is written with mode `0600` (owner read/write only). `expires_at` is co
 - Tokens are stored in the user config directory (`os.UserConfigDir()`), not in the project directory
 - Debug mode (`APSNAV_DEBUG=1`) logs API request/response bodies but **does not log tokens** — `Authorization` header values are not included in debug output
 - Port 7879 is used only during the OAuth callback window; the server stops immediately after receiving one valid request
+- The OAuth callback listener binds to `127.0.0.1` only, never `0.0.0.0` (H1)
+- Reflected `error` / `error_description` query params on the callback page are HTML-escaped (XSS defense)
+
+---
+
+## Security Hardening (PR #1)
+
+Three findings from the 2026-05-02 security review shipped together:
+
+| ID | Finding | Mitigation |
+|----|---------|------------|
+| **H1** | Callback listener bound to all interfaces; reflected error params unescaped | Bind explicitly to `127.0.0.1`; `html.EscapeString` the reflected query params |
+| **H2** | `api.DownloadFile` attached the bearer token to signed-URL downloads | Removed the `token` parameter from the signature. Signed URLs are self-authenticated (signature embedded in the URL); attaching the bearer would leak the user's APS access token if the URL was ever poisoned or MITM'd. |
+| **M2** | Fusion MCP `InsertDocument` built a Python script via hand-rolled string escaping of `fileId` | `validFileID` whitelist regex `^[A-Za-z0-9._:\-]+$` rejects anything outside the URL-safe APS lineage URN charset. The script-construction path now uses `json.Marshal` (JSON string syntax is a strict subset of Python string syntax, so the result is always a valid Python literal — no ad-hoc escaping). The same whitelist is applied to `OpenDocument`. |
+
+### Pending follow-ups
+
+Tracked in [`SECURITY-TODO.md`](../SECURITY-TODO.md) at the repo root. The most relevant authentication-layer item:
+
+- **M1. Add `state` parameter to OAuth flow** — PKCE already prevents code-injection (the verifier is local), but `state` is the standard CSRF defense for the redirect step (RFC 6749 §10.12, RFC 9700) and costs nothing. Will be plumbed through `Login` → `buildAuthURL` → `WaitForCallback`.
+
+The remaining items (M3, L1–L5) cover signed-URL redaction in debug logs, OS-keychain token storage, browser-URL scheme validation, and dependency bumps.

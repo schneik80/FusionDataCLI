@@ -36,3 +36,9 @@ config.json
 *.swo
 *~
 fusiondatacli.zip
+
+# Generated docs (e.g. README.pdf exports)
+*.pdf
+
+# Test coverage output
+coverage.out
