@@ -346,14 +346,11 @@ func TestActiveHubProjects_SuccessFalse(t *testing.T) {
 	if err == nil {
 		t.Fatal("ActiveHubProjects: expected error for success:false, got nil")
 	}
-	// Subtlety: callTool's parseToolErrorText branch fires first on success:false
-	// payloads, surfacing them as "tool reported failure" before the per-method
-	// "projects query failed" branch in ActiveHubProjects ever runs. Either
-	// message indicates the failure was caught — assert on either to remain
-	// resilient to whichever guard short-circuits first.
-	msg := err.Error()
-	if !strings.Contains(msg, "projects query failed") && !strings.Contains(msg, "tool reported failure") {
-		t.Errorf("ActiveHubProjects: error %q does not contain \"projects query failed\" or \"tool reported failure\"", msg)
+	// callTool's parseToolErrorText catches {success:false} (no error field)
+	// and surfaces it as "tool reported failure". The per-method success
+	// guard in ActiveHubProjects was removed because it was unreachable.
+	if msg := err.Error(); !strings.Contains(msg, "tool reported failure") {
+		t.Errorf("ActiveHubProjects: error %q does not contain %q", msg, "tool reported failure")
 	}
 }
 

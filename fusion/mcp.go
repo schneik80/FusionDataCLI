@@ -158,15 +158,15 @@ func (c *Client) ActiveHubProjects(ctx context.Context) ([]HubProject, error) {
 	if tr == nil || len(tr.Content) == 0 {
 		return nil, errors.New("fusion MCP: empty projects response")
 	}
+	// success:false payloads (with or without an error string) are caught
+	// upstream by parseToolErrorText in callTool and surfaced as an error
+	// from c.invoke above, so we only reach this point on a success path —
+	// no need for a per-method success guard here.
 	var payload struct {
-		Success  *bool        `json:"success"`
 		Projects []HubProject `json:"projects"`
 	}
 	if err := json.Unmarshal([]byte(tr.Content[0].Text), &payload); err != nil {
 		return nil, fmt.Errorf("fusion MCP: decoding projects: %w", err)
-	}
-	if payload.Success != nil && !*payload.Success {
-		return nil, errors.New("fusion MCP: projects query failed")
 	}
 	return payload.Projects, nil
 }
