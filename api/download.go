@@ -99,6 +99,14 @@ func DownloadFile(ctx context.Context, url, destPath string) error {
 	return nil
 }
 
+// userHomeDir and nowFunc are package vars so tests can inject a temp
+// directory and a fixed time for deterministic StepDownloadPath output.
+// Production code uses the stdlib defaults.
+var (
+	userHomeDir = os.UserHomeDir
+	nowFunc     = time.Now
+)
+
 // StepDownloadPath returns a sensible local destination for a STEP file
 // derived from name. Prefers ~/Downloads, falling back to the OS temp dir
 // if the home directory cannot be determined. A timestamp suffix avoids
@@ -108,8 +116,8 @@ func StepDownloadPath(name string) string {
 	if safe == "" {
 		safe = "design"
 	}
-	fname := fmt.Sprintf("%s-%s.stp", safe, time.Now().Format("20060102-150405"))
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
+	fname := fmt.Sprintf("%s-%s.stp", safe, nowFunc().Format("20060102-150405"))
+	if home, err := userHomeDir(); err == nil && home != "" {
 		return filepath.Join(home, "Downloads", fname)
 	}
 	return filepath.Join(os.TempDir(), fname)
