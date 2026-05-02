@@ -56,7 +56,7 @@ sequenceDiagram
     Note over App: cursor = "" → stop
 ```
 
-Pagination limit is set to `50` per page. The APS API accepts values from 1–99 (the documented max of 100 is exclusive).
+Pagination limit is set to `50` per page. The APS validator rejects values ≥ 100 outright (`"pagination must be between 0 and 100"`), and even at 99 the GraphQL query-cost cap (1000 points) is exceeded by the field set this app uses — 200 results blew through it. 50 is the original safe value used since v0.1 and is enforced via the `pageSize = 50` constant in `api/queries.go`.
 
 ---
 
@@ -262,6 +262,71 @@ query GetItemDetails($hubId: ID!, $itemId: ID!) {
 
 ---
 
+### RequestSTEPDerivative
+
+Asks APS to translate a design's tip root component version into a STEP file and report the signed download URL when ready. Used by the `[d]` key in the UI. Lives in `api/download.go`.
+
+```graphql
+query GetGeometry($componentVersionId: ID!) {
+    componentVersion(componentVersionId: $componentVersionId) {
+        derivatives(derivativeInput: {outputFormat: STEP, generate: true}) {
+            expires
+            signedUrl
+            status
+            outputFormat
+        }
+    }
+}
+```
+
+The same query both **kicks off** generation (the first call, when no derivative exists yet) and **reports current status** thereafter. APS keeps the worker running between calls, so the client polls until status reaches `SUCCESS` or `FAILED`:
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant API as APS GraphQL
+    participant CDN as APS Signed-URL CDN
+
+    App->>API: RequestSTEPDerivative(cvid) — first call
+    API-->>App: { status: PENDING, signedUrl: "" }
+    Note over App: Tea.Tick 2s, repeat
+    App->>API: RequestSTEPDerivative(cvid)
+    API-->>App: { status: PENDING, signedUrl: "" }
+    App->>API: RequestSTEPDerivative(cvid)
+    API-->>App: { status: SUCCESS, signedUrl: "https://…" }
+    App->>CDN: GET signedUrl (no Authorization header)
+    CDN-->>App: STEP bytes (streamed to ~/Downloads/<name>-<ts>.stp)
+```
+
+`RequestSTEPDerivative` returns `(status, signedURL, err)`. Status values are `PENDING`, `SUCCESS`, and `FAILED` (the constants `StepStatusPending`, `StepStatusSuccess`, `StepStatusFailed`). `signedURL` is empty until status reaches `SUCCESS`.
+
+**Restrictions:**
+
+- Only valid on `DesignItem`. Drawings, configured designs, and folders/projects have no `tipRootComponentVersion` and the API returns no derivative. The UI checks `details.Typename == "DesignItem"` and `details.RootComponentVersionID != ""` before issuing the call.
+- The signed URL expires (the `expires` field is returned but currently unused — the client downloads immediately after `SUCCESS`).
+
+#### DownloadFile
+
+Streams the signed-URL response to a destination path. Critically, **the user's bearer token is intentionally NOT attached** — APS signed URLs are self-authenticated (the signature is embedded in the URL) and adding a bearer would leak the access token to whatever host the signed URL points at. If a poisoned or MITM'd GraphQL response ever returned a non-Autodesk URL, the blast radius is confined to the (already untrusted) signed URL itself.
+
+```go
+func DownloadFile(ctx context.Context, url, destPath string) error
+```
+
+The destination directory is created (`0755`) if needed; the file is written via `os.Create`. Non-2xx responses are surfaced with the first 2 KiB of the body for diagnostics.
+
+#### StepDownloadPath
+
+Returns a sensible local path for a STEP file derived from `name`:
+
+- Prefers `~/Downloads/<sanitised-name>-<YYYYMMDD-HHMMSS>.stp`
+- Falls back to `os.TempDir()` if `os.UserHomeDir()` fails or returns empty
+- Filenames are sanitised to alphanumerics + `- _ . space` (everything else becomes `_`) so the path round-trips cleanly across Linux, macOS, and Windows
+
+The `userHomeDir` and `nowFunc` package vars are swappable by tests for deterministic output (see Testing below).
+
+---
+
 ## NavItem Struct
 
 All list queries produce `[]NavItem`. This is the fundamental navigation unit passed between the `api` and `ui` packages.
@@ -355,8 +420,8 @@ GraphQL errors are returned in a top-level `errors` array alongside `data`. The 
 ```
 
 HTTP-level errors (non-2xx) are returned directly:
-- `401 Unauthorized` → surfaced as "unauthorized — token may be expired (re-run to reauthenticate)"
-- Other 4xx/5xx → raw status string
+- `401 Unauthorized` → short-circuited before body parsing; surfaced as `"unauthorized (HTTP 401) — token may be expired or lacks scope/entitlement; body: <raw>"`. Bypassing the JSON decode avoids spurious "parsing GraphQL response" errors when APS returns a non-JSON 401 body.
+- Other 4xx/5xx → response body is parsed; GraphQL `errors` are surfaced if present, otherwise the raw bytes are returned.
 
 ---
 
@@ -389,3 +454,37 @@ APS_REGION=AUS  fusiondatacli   # Australia
 Or set `"region": "EMEA"` in `~/.config/fusiondatacli/config.json`.
 
 When a region is set, the `X-Ads-Region` header is added to every GraphQL request.
+
+---
+
+## Testing
+
+The `api` package endpoint is held in a package-level `var` rather than a `const` so tests in any package can swap it for an `httptest.Server` URL:
+
+```go
+// api/client.go
+var graphqlEndpoint = "https://developer.api.autodesk.com/mfg/graphql"
+```
+
+Same-package tests (`api/*_test.go`) can write `graphqlEndpoint` directly. Cross-package tests (notably `ui/` flow tests that drive a `tea.Cmd` which internally calls into `api`) use the exported helper:
+
+```go
+// SetGraphqlEndpointForTesting overrides graphqlEndpoint and returns a
+// restore func. Production code MUST NOT call this.
+func SetGraphqlEndpointForTesting(url string) (restore func())
+```
+
+Typical use:
+
+```go
+srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
+    return testutil.GraphQLResponse{ Data: map[string]any{ /* ... */ } }
+})
+restore := api.SetGraphqlEndpointForTesting(srv.URL)
+defer restore()
+// drive UI / api code under test...
+```
+
+`testutil.GraphQLServer` is in the shared `internal/testutil/` package — see [`docs/architecture.md`](architecture.md) and [`docs/development.md`](development.md) for the full test strategy.
+
+The `download.go` package vars `userHomeDir` and `nowFunc` follow the same pattern: tests overwrite them to redirect downloads into a `t.TempDir()` and produce deterministic timestamps.

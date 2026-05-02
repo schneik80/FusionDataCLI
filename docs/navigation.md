@@ -103,16 +103,17 @@ stateDiagram-v2
 | `↑` `k` | Move cursor up in active column |
 | `↓` `j` | Move cursor down in active column |
 | `→` `l` `Enter` | Move focus right — load next level or open details |
-| `←` `h` | Move focus left — go back or pop folder from stack |
+| `←` | Move focus left — go back or pop folder from stack |
+| `h` | Switch hub — re-open the hub picker |
 
 ### Actions
 
 | Key | Action |
 |-----|--------|
-| `d` | Toggle details panel (fourth column) |
 | `o` | Open focused document permalink in system default browser (only after details panel has loaded; no-op on folders/projects or during loading) |
 | `f` | Open focused document in the running Fusion desktop client (via Fusion MCP server) |
 | `i` | Insert focused document as a new occurrence into the active Fusion design (via Fusion MCP server) |
+| `d` | Download STEP file for the selected design (DesignItem only; no-op on drawings, configured designs, or containers) |
 | `r` | Refresh current column |
 | `t` | Cycle color theme (Rust → Mono → System → Rust) |
 | `m` | Toggle mouse support on/off (default: on) |
@@ -156,7 +157,7 @@ Mouse support is enabled by default and can be toggled with `m`. The footer bar 
 
 The breadcrumb bar at the top shows the current navigation path: Hub > Project > Folder(s) > Document.
 
-### Four-column mode (details open with `d`)
+### Four-column mode (details panel auto-opens for selected documents)
 
 ```
 ┌────────────────────────────────────────────────────┬─────────────────────┐
@@ -210,8 +211,8 @@ flowchart LR
     E -- Yes --> C
     C -- "← back" --> B
     B -- "← back" --> A
-    C -- "→ select document\nor d" --> F([Details\nCol 3])
-    F -- "d or ←" --> C
+    C -- "→ select document" --> F([Details\nCol 3])
+    F -- "← or select container" --> C
 ```
 
 ---
@@ -264,6 +265,32 @@ flowchart TD
 Earlier versions tried to fall back to the project-level `fusionWebUrl` or to hand-constructed URLs like `https://autodesk360.com/g/projects/<id>` and `https://acc.autodesk.com/docs/files/projects/<id>`. Those patterns are rejected by Autodesk's team web app with a raw JSON `BROWSER_LOGIN_REQUIRED` / `WEB SESSION INVALID` error for team hubs, and they don't round-trip through the hub-subdomain routing that the real web app expects. They've been removed — the only trusted source is the item-level permalink.
 
 The status bar prints the full URL as it's handed to the OS browser handler, and an `OPEN_BROWSER <url>` line is appended to the debug log (`APSNAV_DEBUG=1`) for inspection.
+
+---
+
+## STEP Download
+
+`d` exports the selected design to a STEP file on local disk. Implemented in `api/download.go` and driven from `ui/app.go`'s `downloadStep` / `requestStepCmd` / `pollStepCmdAfter` / `downloadStepFileCmd`.
+
+```mermaid
+flowchart TD
+    A{DesignItem selected?\nDetails loaded?\nRootComponentVersionID set?} -- No --> Z[No-op with status hint:\nwait for details / not a design /\ndownload already in progress]
+    A -- Yes --> B[Set downloadInProgress = true\nstatusMsg: \"Requesting STEP translation…\"]
+    B --> C[GraphQL: componentVersion.derivatives\noutputFormat: STEP, generate: true]
+    C --> D{Status?}
+    D -- PENDING --> E[Tea.Tick 2s, retry GraphQL]
+    E --> D
+    D -- FAILED --> F[Status bar: error, clear flag]
+    D -- SUCCESS --> G[GET signedUrl (no bearer attached)\nstream to ~/Downloads/&lt;name&gt;-&lt;ts&gt;.stp]
+    G --> H[Status bar: \"Saved to <path>\"]
+```
+
+**Restrictions:**
+- Only valid on `DesignItem`. Drawings (`DrawingItem`) and configured designs (`ConfiguredDesignItem`) have no `tipRootComponentVersion`, so the API can't generate a STEP — the UI rejects the keypress with a status-bar hint.
+- A second `d` while a download is in flight is rejected so polls don't pile up.
+- The destination path is `~/Downloads/<sanitised-name>-<YYYYMMDD-HHMMSS>.stp`, falling back to `os.TempDir()` if the home directory cannot be determined.
+
+The signed URL returned by the derivatives query is downloaded **without** an `Authorization` header — APS signed URLs are self-authenticated, and attaching the user's bearer would leak it if the URL were ever poisoned. (Security finding **H2**, fixed in PR #1.)
 
 ---
 
@@ -325,7 +352,7 @@ The System theme uses ANSI color token numbers rather than hex values, so it inh
 
 ## Details Panel
 
-The details panel opens alongside the browser columns when `d` is pressed on any document item (design, drawing, or configured design). It auto-reloads as the cursor moves through documents.
+The details panel sits alongside the browser columns and auto-loads whenever the cursor lands on a document item (design, drawing, or configured design). When the cursor moves to a container (project / folder) the panel clears. Re-visiting a previously-loaded item is served instantly from the in-memory `detailsCache` — no API call is made.
 
 **Fields shown:**
 

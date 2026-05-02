@@ -122,6 +122,7 @@ graph TD
         client["client.go\ngqlQuery + NavItem"]
         queries["queries.go\nList queries + pagination"]
         details["details.go\nGetItemDetails"]
+        download["download.go\nSTEP derivative + DownloadFile"]
         debug["debug.go\nRequest logging"]
     end
 ```
@@ -137,6 +138,88 @@ APSNAV_DEBUG=1 fusiondatacli
 - Logs every GraphQL request body and response
 - Press `?` in the browser to view the rolling log (max 500 lines)
 - Nothing is written to disk; logs live only in memory for the session
+
+---
+
+## Test Suite
+
+```sh
+make check        # go vet ./... + go test -race ./...
+go test -race -count=1 -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out
+```
+
+`make check` is what CI runs on every pull request and push to `main` (`.github/workflows/test.yml`). The full suite finishes in under five seconds.
+
+### Coverage by package
+
+The Phase 3 baseline (PR #4):
+
+| Package | Coverage |
+|---------|----------|
+| `config` | 90.6% |
+| `fusion` | 84.2% |
+| `auth` | 73.9% |
+| `api` | 69.7% |
+| `ui` | 32.5% |
+| **Total** | **43.1%** |
+
+### Three-layer test strategy
+
+| Layer | What it covers | How |
+|-------|----------------|-----|
+| **L1 — Pure unit** | Config parsing, OAuth helpers (PKCE, URL build), GraphQL response decode, MCP envelope helpers, UI helpers (filename sanitisation, breadcrumb building, layout math) | Plain `testing.T`, no I/O |
+| **L2 — HTTP integration** | Full OAuth flow against fake auth, `gqlQuery` against fake GraphQL, MCP JSON-RPC session caching + retry against fake MCP, H1 + H2 regression guards | `httptest.Server` driven via `internal/testutil` |
+| **L3 — TUI flow** | Bubble Tea `Update(msg)` / `View()` drive end-to-end through `tea.Cmd` → `api` → mocked APS server | Direct `Update`/`View` calls; `api.SetGraphqlEndpointForTesting` swaps the endpoint |
+
+See [`architecture.md`](architecture.md) for the design rationale.
+
+### `internal/testutil/` — shared HTTP fakes
+
+Two helpers, both auto-cleaned via `t.Cleanup`:
+
+```go
+// Fake APS GraphQL server. Captures Authorization + X-Ads-Region headers.
+srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
+    return testutil.GraphQLResponse{
+        Data: map[string]any{ "hubs": map[string]any{ /* ... */ } },
+    }
+})
+
+// Fake Fusion MCP JSON-RPC server. Tracks per-tool call counts + session IDs.
+mcp := testutil.NewMCPServer(t, testutil.MCPScenario{
+    SessionID: "sid-123",
+    Tools: map[string]testutil.MCPHandler{
+        "fusion_mcp_execute": func(args map[string]any) testutil.MCPResponse {
+            return testutil.MCPResponse{ ContentText: `{"success": true}` }
+        },
+    },
+})
+```
+
+For real-world examples, see `auth/oauth_test.go`, `api/queries_test.go`, `fusion/mcp_test.go`, and `ui/app_test.go`.
+
+### Const→var injection pattern
+
+Several production endpoints and clock dependencies are package-level `var` (rather than `const`) specifically so tests can swap them. **Production code never reassigns them.** Do not refactor any of these back to `const` without first plumbing in a different injection mechanism — the tests rely on direct overwrites.
+
+| Symbol | Package | What tests do |
+|--------|---------|---------------|
+| `graphqlEndpoint` | `api/client.go` | Point at `httptest.Server.URL` |
+| `authEndpoint`, `tokenEndpoint`, `authScope` | `auth/oauth.go` | Point at fake auth server |
+| `callbackPort`, `CallbackURL` | `auth/callback.go` | Set to `0` so the kernel assigns an ephemeral port; rewrite `CallbackURL` to the resolved address |
+| `userHomeDir`, `nowFunc` | `api/download.go` | Stub home dir to `t.TempDir()`; freeze the clock so generated timestamps are deterministic |
+
+### Cross-package endpoint swapping
+
+Same-package tests can write the `var` directly. Cross-package tests (notably `ui/` flow tests that drive a `tea.Cmd` which calls into `api`) must use the exported helper:
+
+```go
+restore := api.SetGraphqlEndpointForTesting(srv.URL)
+defer restore()
+```
+
+This returns a closure that restores the prior value, so parallel-safe `t.Cleanup`-style usage is straightforward. The helper is reserved for tests; production code must never call it.
 
 ---
 
@@ -174,6 +257,16 @@ flowchart TD
         Archives --> GHRelease[GitHub Release\nv{version}]
         GHRelease --> BrewFormula["Push formula to\nschneik80/homebrew-fusiondatacli\nFormula/fusiondatacli.rb"]
     end
+
+    subgraph "mac-installer job (needs: release)"
+        MIChk[checkout] --> MISetup[setup-go]
+        MISetup --> MICert["Import Apple\nDeveloper ID certificate"]
+        MICert --> MIBuild["Build universal binary\n(arm64 + amd64 → lipo)"]
+        MIBuild --> MISign["codesign --options runtime\nDeveloper ID Application"]
+        MISign --> MIPkg["pkgbuild + productsign\nDeveloper ID Installer"]
+        MIPkg --> MINotary["xcrun notarytool submit\n--wait, then stapler staple"]
+        MINotary --> MIUpload["Upload signed/notarized\n.pkg to GitHub release"]
+    end
 ```
 
 ### Triggering a release
@@ -185,6 +278,18 @@ git push origin v0.4.0
 
 The workflow fires automatically. No manual steps needed.
 
+### macOS .pkg installer
+
+The `mac-installer` job runs after the main `release` job and produces a signed, notarized `.pkg` for macOS:
+
+1. Build a universal binary (`arm64` + `amd64` joined via `lipo`)
+2. Codesign the binary with a `Developer ID Application` identity (hardened runtime, secure timestamp)
+3. `pkgbuild` the payload to install at `/usr/local/bin/fusiondatacli`, then `productsign` with a `Developer ID Installer` identity
+4. Submit to Apple's notary service via `xcrun notarytool submit --wait` and `stapler staple` the ticket
+5. Upload `FusionDataCLI-<version>-darwin-universal.pkg` to the GitHub release
+
+End users can double-click the `.pkg` and install without Gatekeeper warnings.
+
 ### Required GitHub secrets
 
 | Secret | Purpose |
@@ -192,6 +297,11 @@ The workflow fires automatically. No manual steps needed.
 | `GITHUB_TOKEN` | Auto-provided by Actions — creates the release |
 | `APS_CLIENT_ID` | Embedded into binaries at build time via ldflag |
 | `HOMEBREW_TAP_GITHUB_TOKEN` | PAT with `repo` scope on `homebrew-fusiondatacli` tap |
+| `APPLE_CERTIFICATE_P12` | Base64-encoded `.p12` containing both Developer ID Application + Installer identities |
+| `APPLE_CERTIFICATE_PASSWORD` | Password for the `.p12` |
+| `APPLE_ID` | Apple ID for notarytool submission |
+| `APPLE_ID_PASSWORD` | App-specific password for the Apple ID |
+| `APPLE_TEAM_ID` | Apple Developer Team ID for notarization |
 
 ### Goreleaser config highlights (`.goreleaser.yaml`)
 
