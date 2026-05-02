@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
-const (
+// callbackPort and CallbackURL are vars (not consts) so tests can bind
+// the listener on an ephemeral port (`:0`) and rewrite CallbackURL to the
+// resolved address. Production code never reassigns them.
+var (
 	callbackPort = 7879
 	// CallbackURL is the redirect URI that must be registered in your APS app settings.
 	CallbackURL = "http://localhost:7879/callback"

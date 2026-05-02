@@ -16,7 +16,9 @@ import (
 	"time"
 )
 
-const (
+// Endpoints are vars (not consts) so tests can swap them for an
+// httptest.Server URL. Production code never reassigns them.
+var (
 	authEndpoint  = "https://developer.api.autodesk.com/authentication/v2/authorize"
 	tokenEndpoint = "https://developer.api.autodesk.com/authentication/v2/token"
 	authScope     = "data:read user-profile:read"

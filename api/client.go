@@ -12,7 +12,9 @@ import (
 	"time"
 )
 
-const graphqlEndpoint = "https://developer.api.autodesk.com/mfg/graphql"
+// graphqlEndpoint is a var (not const) so tests can point it at an
+// httptest.Server. Production code never reassigns it.
+var graphqlEndpoint = "https://developer.api.autodesk.com/mfg/graphql"
 
 // region is the X-Ads-Region header value sent with every request.
 // Empty means no header is sent (defaults to US on the server side).

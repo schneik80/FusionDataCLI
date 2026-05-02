@@ -1,0 +1,30 @@
+{
+  "item": {
+    "__typename": "DesignItem",
+    "id": "urn:item:abc",
+    "name": "Widget A",
+    "size": "12345678",
+    "mimeType": "application/vnd.autodesk.fusion360",
+    "extensionType": "Fusion360",
+    "createdOn": "2024-01-15T10:30:45Z",
+    "createdBy": {"firstName": "Ada", "lastName": "Lovelace"},
+    "lastModifiedOn": "2024-02-20T14:00:00Z",
+    "lastModifiedBy": {"firstName": "Grace", "lastName": "Hopper"},
+    "fusionWebUrl": "https://fusion.example/widget-a",
+    "tipVersion": {"versionNumber": 3},
+    "tipRootComponentVersion": {
+      "id": "urn:cv:xyz",
+      "partNumber": "WGT-001",
+      "partDescription": "The widget A",
+      "materialName": "Aluminum 6061",
+      "isMilestone": true
+    }
+  },
+  "itemVersions": {
+    "results": [
+      {"versionNumber": 1, "name": "first", "createdOn": "2024-01-15T10:30:45Z", "createdBy": {"firstName": "Ada", "lastName": "Lovelace"}},
+      {"versionNumber": 2, "name": "second save", "createdOn": "2024-01-20T11:00:00Z", "createdBy": {"firstName": "Ada", "lastName": "Lovelace"}},
+      {"versionNumber": 3, "name": "third edit", "createdOn": "2024-02-20T14:00:00Z", "createdBy": {"firstName": "Grace", "lastName": "Hopper"}}
+    ]
+  }
+}
