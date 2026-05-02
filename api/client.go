@@ -49,6 +49,17 @@ func SetRegion(r string) {
 	region = r
 }
 
+// SetGraphqlEndpointForTesting overrides the GraphQL endpoint URL and
+// returns a function that restores the prior value. Intended only for
+// tests that need to point the api package at an httptest.Server from a
+// different test package (notably ui flow tests that drive a tea.Cmd which
+// internally calls into api). Production code MUST NOT call this.
+func SetGraphqlEndpointForTesting(url string) (restore func()) {
+	prev := graphqlEndpoint
+	graphqlEndpoint = url
+	return func() { graphqlEndpoint = prev }
+}
+
 // NavItem is a navigable node in the APS Manufacturing Data Model hierarchy.
 type NavItem struct {
 	ID          string
