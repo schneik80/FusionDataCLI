@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"time"
@@ -26,7 +27,7 @@ func WaitForCallback(ctx context.Context) (string, error) {
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		if e := r.URL.Query().Get("error"); e != "" {
 			desc := r.URL.Query().Get("error_description")
-			fmt.Fprintf(w, "<html><body><h2>Authentication failed</h2><p>%s: %s</p><p>You can close this window.</p></body></html>", e, desc)
+			fmt.Fprintf(w, "<html><body><h2>Authentication failed</h2><p>%s: %s</p><p>You can close this window.</p></body></html>", html.EscapeString(e), html.EscapeString(desc))
 			errCh <- fmt.Errorf("oauth error: %s — %s", e, desc)
 			return
 		}
@@ -40,7 +41,7 @@ func WaitForCallback(ctx context.Context) (string, error) {
 		codeCh <- code
 	})
 
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", callbackPort))
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", callbackPort))
 	if err != nil {
 		return "", fmt.Errorf("cannot start callback server on port %d: %w\n(Is another instance already running?)", callbackPort, err)
 	}
