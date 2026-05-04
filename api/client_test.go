@@ -173,6 +173,46 @@ func TestGqlQuery_RetriesOnUnknownErrorType(t *testing.T) {
 	}
 }
 
+// TestGqlQuery_DeepFieldErrorReturnsData covers a real APS pattern: the
+// data is fully populated, but a deeply nested field on a few rows can't
+// be resolved (e.g. owning project was deactivated). The errors carry
+// errorType:UNKNOWN with deep paths. We must NOT retry (the next attempt
+// returns the same partial response), and we MUST surface the data so
+// the calling tab can render the usable rows.
+func TestGqlQuery_DeepFieldErrorReturnsData(t *testing.T) {
+	prev := retryBackoffs
+	retryBackoffs = []time.Duration{0, 1 * time.Millisecond, 1 * time.Millisecond}
+	t.Cleanup(func() { retryBackoffs = prev })
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		// Data has real content; errors point at a deep leaf field.
+		_, _ = io.WriteString(w, `{
+			"data": { "x": [{"y": 1}, {"y": null}] },
+			"errors": [{
+				"message": "deactivated project",
+				"path": ["x", 1, "y", "fusionWebUrl"],
+				"extensions": { "code": "EXCEPTION_DISABLED_COMMUNITY", "errorType": "UNKNOWN" }
+			}]
+		}`)
+	}))
+	t.Cleanup(srv.Close)
+	swapEndpoint(t, srv.URL)
+
+	raw, err := gqlQuery(context.Background(), "tok", "query Q {}", nil)
+	if err != nil {
+		t.Fatalf("expected no error (data should be passed through), got %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("call count = %d, want 1 (no retry on deep-field error)", got)
+	}
+	if !strings.Contains(string(raw), `"x"`) {
+		t.Errorf("data not surfaced: %s", raw)
+	}
+}
+
 func TestGqlQuery_NoRetryOnConcreteError(t *testing.T) {
 	// errorType not "UNKNOWN" → must not retry.
 	prev := retryBackoffs
