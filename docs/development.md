@@ -99,31 +99,34 @@ make dev                          # go run . without embedded ID
 
 ```mermaid
 graph TD
-    main["main.go\nEntry point"] --> config["config/\nConfig loading"]
+    main["main.go\nentry point + panic recovery"] --> config["config/\nClient ID, region, paths"]
     main --> ui["ui/\nBubbleTea TUI"]
     ui --> auth["auth/\nOAuth PKCE"]
     ui --> api_pkg["api/\nGraphQL client"]
+    ui --> fusion_pkg["fusion/\nFusion desktop MCP"]
     auth --> config
     api_pkg --> config
 
     subgraph "ui/ package"
-        app["app.go\nModel + Update + View"]
-        keys["keys.go\nKey bindings"]
-        styles["styles.go\nThemes + Lipgloss"]
+        app["app.go\nModel, Update, View, tabs,\nShow-in-Location orchestration"]
+        keys["keys.go\nkey bindings\n(1-4, Tab, Shift+Tab, Enter)"]
+        styles["styles.go\nthemes, Lipgloss styles, tab strip"]
     end
 
     subgraph "auth/ package"
         oauth["oauth.go\nLogin + Refresh"]
-        callback["callback.go\nLocal HTTP :7879"]
+        callback["callback.go\nlocal HTTP :7879"]
         tokens["tokens.go\nLoad + Save"]
     end
 
     subgraph "api/ package"
-        client["client.go\ngqlQuery + NavItem"]
-        queries["queries.go\nList queries + pagination"]
-        details["details.go\nGetItemDetails"]
+        client["client.go\ngqlQuery retry loop + gqlQueryOnce\nNavItem"]
+        queries["queries.go\nhierarchy queries + allPages()"]
+        details_f["details.go\nGetItemDetails"]
+        refs["refs.go\nGetOccurrences / GetWhereUsed /\nGetDrawingsForDesign / GetDrawingSource"]
+        locate["locate.go\nGetItemLocation\n(parentFolder walk)"]
         download["download.go\nSTEP derivative + DownloadFile"]
-        debug["debug.go\nRequest logging"]
+        debug["debug.go\nin-mem ring + debug.log + stderr"]
     end
 ```
 
@@ -131,13 +134,18 @@ graph TD
 
 ## Debug Mode
 
+For day-to-day development:
+
 ```sh
 APSNAV_DEBUG=1 fusiondatacli
 ```
 
-- Logs every GraphQL request body and response
-- Press `?` in the browser to view the rolling log (max 500 lines)
-- Nothing is written to disk; logs live only in memory for the session
+- Logs every GraphQL request body and response.
+- Press `?` in the browser to view the rolling in-app log (max 500 lines).
+- Also written to `~/.config/fusiondatacli/debug.log` (mode 0600, truncated each session) so you can `tail -f` it from another terminal.
+- Stderr mirroring is auto-enabled when stderr is redirected (`2> log`), suppressed when stderr is a TTY (so the live TUI isn't smeared).
+
+End users reporting bugs should follow [`docs/debugging.md`](debugging.md), which walks through what to capture and how to file a defect.
 
 ---
 
@@ -151,75 +159,7 @@ go tool cover -func=coverage.out
 
 `make check` is what CI runs on every pull request and push to `main` (`.github/workflows/test.yml`). The full suite finishes in under five seconds.
 
-### Coverage by package
-
-The Phase 3 baseline (PR #4):
-
-| Package | Coverage |
-|---------|----------|
-| `config` | 90.6% |
-| `fusion` | 84.2% |
-| `auth` | 73.9% |
-| `api` | 69.7% |
-| `ui` | 32.5% |
-| **Total** | **43.1%** |
-
-### Three-layer test strategy
-
-| Layer | What it covers | How |
-|-------|----------------|-----|
-| **L1 — Pure unit** | Config parsing, OAuth helpers (PKCE, URL build), GraphQL response decode, MCP envelope helpers, UI helpers (filename sanitisation, breadcrumb building, layout math) | Plain `testing.T`, no I/O |
-| **L2 — HTTP integration** | Full OAuth flow against fake auth, `gqlQuery` against fake GraphQL, MCP JSON-RPC session caching + retry against fake MCP, H1 + H2 regression guards | `httptest.Server` driven via `internal/testutil` |
-| **L3 — TUI flow** | Bubble Tea `Update(msg)` / `View()` drive end-to-end through `tea.Cmd` → `api` → mocked APS server | Direct `Update`/`View` calls; `api.SetGraphqlEndpointForTesting` swaps the endpoint |
-
-See [`architecture.md`](architecture.md) for the design rationale.
-
-### `internal/testutil/` — shared HTTP fakes
-
-Two helpers, both auto-cleaned via `t.Cleanup`:
-
-```go
-// Fake APS GraphQL server. Captures Authorization + X-Ads-Region headers.
-srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
-    return testutil.GraphQLResponse{
-        Data: map[string]any{ "hubs": map[string]any{ /* ... */ } },
-    }
-})
-
-// Fake Fusion MCP JSON-RPC server. Tracks per-tool call counts + session IDs.
-mcp := testutil.NewMCPServer(t, testutil.MCPScenario{
-    SessionID: "sid-123",
-    Tools: map[string]testutil.MCPHandler{
-        "fusion_mcp_execute": func(args map[string]any) testutil.MCPResponse {
-            return testutil.MCPResponse{ ContentText: `{"success": true}` }
-        },
-    },
-})
-```
-
-For real-world examples, see `auth/oauth_test.go`, `api/queries_test.go`, `fusion/mcp_test.go`, and `ui/app_test.go`.
-
-### Const→var injection pattern
-
-Several production endpoints and clock dependencies are package-level `var` (rather than `const`) specifically so tests can swap them. **Production code never reassigns them.** Do not refactor any of these back to `const` without first plumbing in a different injection mechanism — the tests rely on direct overwrites.
-
-| Symbol | Package | What tests do |
-|--------|---------|---------------|
-| `graphqlEndpoint` | `api/client.go` | Point at `httptest.Server.URL` |
-| `authEndpoint`, `tokenEndpoint`, `authScope` | `auth/oauth.go` | Point at fake auth server |
-| `callbackPort`, `CallbackURL` | `auth/callback.go` | Set to `0` so the kernel assigns an ephemeral port; rewrite `CallbackURL` to the resolved address |
-| `userHomeDir`, `nowFunc` | `api/download.go` | Stub home dir to `t.TempDir()`; freeze the clock so generated timestamps are deterministic |
-
-### Cross-package endpoint swapping
-
-Same-package tests can write the `var` directly. Cross-package tests (notably `ui/` flow tests that drive a `tea.Cmd` which calls into `api`) must use the exported helper:
-
-```go
-restore := api.SetGraphqlEndpointForTesting(srv.URL)
-defer restore()
-```
-
-This returns a closure that restores the prior value, so parallel-safe `t.Cleanup`-style usage is straightforward. The helper is reserved for tests; production code must never call it.
+The full test architecture — layer breakdown, fixtures, naming conventions, the const→var injection pattern, and how to extend the suite — is documented in [`docs/testing.md`](testing.md).
 
 ---
 

@@ -120,6 +120,8 @@ graph TD
 
 ## Data Flow — From Keypress to Screen
 
+### Hierarchy navigation (arrow keys, Enter on a folder)
+
 ```mermaid
 sequenceDiagram
     participant OS as Terminal / OS
@@ -134,15 +136,43 @@ sequenceDiagram
     Update->>Update: navigateRight()
     Update->>Cmd: loadItemsCmd(token, hubID, folderID)
     Cmd->>API: GetItems(ctx, token, hubID, folderID)
-    Note over API: gqlQuery: up to 3 attempts<br/>retry on errorType:UNKNOWN<br/>or HTTP 408/429/5xx
+    Note over API: gqlQuery: up to 3 attempts<br/>retry on root-level errorType:UNKNOWN<br/>or HTTP 408/429/5xx
     API->>APS: POST /mfg/graphql
     APS-->>API: JSON response
     API-->>Cmd: []NavItem
     Cmd-->>BT: contentsLoadedMsg{items}
     BT->>Update: Update(contentsLoadedMsg)
-    Update->>Update: populate cols[2], set loading=false
+    Update->>Update: populate cols[1], maybeLoadDetails()
     BT->>BT: View() → render to terminal
 ```
+
+### Tab activation (1-4, Tab/Shift+Tab)
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant Update as Model.Update
+    participant Cmd as tea.Cmd
+    participant API as api package
+
+    U->>Update: KeyMsg{2}
+    Update->>Update: selectTab(tabUses)
+    Update->>Update: maybeLoadActiveTab()
+    alt cache hit (usesCache[key])
+        Update-->>U: render cached rows
+    else cache miss
+        Update->>Cmd: loadUsesCmd / loadDrawingUsesCmd
+        Cmd->>API: GetOccurrences | GetDrawingSource
+        API-->>Cmd: []ComponentRef
+        Cmd-->>Update: usesLoadedMsg{key, items, err}
+        Update->>Update: usesCache[key] = items
+        Update-->>U: render rows
+    end
+```
+
+### Show in Location (Enter / double-click on a tab row)
+
+See [`docs/navigation.md`](navigation.md#tab-cursor-and-show-in-location) for the user-visible flow; the API-side detail is in [`docs/api.md`](api.md#getitemlocation--show-in-location).
 
 ---
 
@@ -151,6 +181,7 @@ sequenceDiagram
 The browser View() runs at spinner rate (~10 Hz) and re-renders every visible row each frame, so a few targeted caches keep navigation snappy on large hubs:
 
 - **`detailsCache map[string]*api.ItemDetails`** — `GetItemDetails` results are memoised by item ID for the lifetime of the session. Item details are immutable for a given ID (a save creates a new version with a new tip-version number, but the item ID is stable), so arrowing back over a previously-visited item is served synchronously without an API call. Refresh (`r`) and hub re-selection clear the map to force re-fetch.
+- **Per-tab caches** — `usesCache`, `whereUsedCache`, and `drawingsCache` each memoise their respective queries. Cache keys differ per relationship: Uses/WhereUsed for designs key on the tip root component-version id; Drawings keys on the design's lineage URN; Uses for drawings keys on the drawing's lineage URN. Hub change and refresh clear all of them; arrowing between items preserves them so a "scan Where Used across these designs" workflow doesn't refetch unchanged data.
 - **`styleCache`** — Lipgloss styles are value types but their rules clone on each chained `.Width(...).Foreground(...)` call. The width-applied variants used in `renderColumn` / `viewDetailsColumn` are precomputed and rebuilt only when terminal size or theme changes. The cache is shared by pointer because Bubble Tea passes the Model by value to View(); a local mutation on a copy would not persist. The rendered detail-panel lines are also cached and keyed on `m.details`'s pointer + width + theme version.
 - **Parallel project-contents fetch** — `loadProjectContentsCmd` issues `foldersByProject` and `itemsByProject` concurrently via `sync.WaitGroup` rather than sequentially. Wall-clock latency drops to roughly the slower of the two queries.
 
@@ -171,46 +202,15 @@ HTTP `401` and concrete-typed GraphQL errors (`VALIDATION`, `BAD_USER_INPUT`, et
 
 ## Test Strategy
 
-Tests live alongside the code they exercise (`*_test.go`) in three layers:
+A three-layer test pyramid lives alongside the code it exercises. The full strategy, layer-by-layer details, naming conventions, and instructions for adding new tests live in [`docs/testing.md`](testing.md).
 
-| Layer | What it covers | How |
-|-------|----------------|-----|
-| **L1 — Pure unit** | Config parsing, OAuth helpers (PKCE verifier/challenge, URL builder), GraphQL response decoding, MCP envelope helpers, UI helpers (filename sanitisation, breadcrumb building, layout math) | Plain `testing.T`, table-driven, no I/O |
-| **L2 — HTTP integration** | Full OAuth flow against a fake auth server, `gqlQuery` against fake GraphQL, MCP JSON-RPC session caching + retry against fake MCP, H1 + H2 regression guards | `httptest.Server` driven via `internal/testutil` |
-| **L3 — TUI flow** | Bubble Tea `Update(msg)` / `View()` drive end-to-end through `tea.Cmd` → `api` → mocked APS server | Direct `Update`/`View` calls; `api.SetGraphqlEndpointForTesting` swaps the endpoint |
-
-Final coverage on Phase 3 (PR #4):
-
-| Package | Coverage |
-|---------|----------|
-| `config` | 90.6% |
-| `fusion` | 84.2% |
-| `auth` | 73.9% |
-| `api` | 69.7% |
-| `ui` | 32.5% |
-| **Total** | **43.1%** |
+| Layer | What it covers |
+|-------|----------------|
+| **L1 — Pure unit** | Config parsing, OAuth helpers, GraphQL response decode, UI helpers (no I/O) |
+| **L2 — HTTP integration** | OAuth, `gqlQuery`, MCP JSON-RPC against `httptest.Server` fakes in `internal/testutil` |
+| **L3 — TUI flow** | Bubble Tea `Update(msg)` / `View()` end-to-end through `tea.Cmd` → mocked APS |
 
 The full `go test -race ./...` suite finishes in under five seconds. CI (`.github/workflows/test.yml`) runs `go vet` + `go test -race -count=1 -coverprofile` on every pull request and push to `main`; locally `make check` does the same.
-
-### `internal/testutil/`
-
-A single shared package houses the in-process HTTP fakes. Two helpers, both auto-cleaned via `t.Cleanup`:
-
-- `GraphQLServer(t, handler)` — emulates `https://developer.api.autodesk.com/mfg/graphql`. Decodes the POST body to `{Query, Variables}`, captures the `Authorization` and `X-Ads-Region` headers, and lets the handler return `{Data, Errors, Status, RawBody}`. Used by `auth/`, `api/`, and `ui/` tests.
-- `NewMCPServer(t, scenario)` — emulates the Fusion desktop MCP JSON-RPC server. Handles `initialize`, the `notifications/initialized` notification (HTTP 204), and `tools/call` dispatched via `scenario.Tools`. Tracks per-tool call counts, init counts, and session-ID arrival order so tests can assert on retry / session-cache behaviour.
-
-### Const→var pattern for testability
-
-Several production endpoints and clock dependencies are declared as package-level `var` (rather than `const`) specifically so tests can swap them. Production code never reassigns them.
-
-| Symbol | Package | Purpose |
-|--------|---------|---------|
-| `graphqlEndpoint` | `api/client.go` | APS GraphQL URL — also exposed via `SetGraphqlEndpointForTesting` for cross-package tests |
-| `authEndpoint`, `tokenEndpoint`, `authScope` | `auth/oauth.go` | OAuth endpoints + scope |
-| `callbackPort`, `CallbackURL` | `auth/callback.go` | Loopback listener port (set to `:0` for ephemeral binding in tests) |
-| `userHomeDir`, `nowFunc` | `api/download.go` | Stubbed to a `t.TempDir()` and a fixed clock for deterministic STEP-path output |
-
-This is the convention to follow when adding a new external dependency that needs to be mockable.
 
 ---
 
@@ -218,7 +218,7 @@ This is the convention to follow when adding a new external dependency that need
 
 ```
 FusionDataCLI/
-├── main.go                  Entry point; wires config → ui; sets version ldflag
+├── main.go                  Entry point + deferred recover(); writes ~/.config/fusiondatacli/panic.log
 │
 ├── config/
 │   └── config.go            Config struct, Load(), Dir(), Path(), DefaultClientID
@@ -230,24 +230,36 @@ FusionDataCLI/
 │
 ├── api/
 │   ├── client.go            gqlQuery() retry loop + gqlQueryOnce(), NavItem, SetRegion(), SetGraphqlEndpointForTesting()
-│   ├── queries.go           GetHubs/Projects/Folders/Items; allPages() pagination
+│   ├── queries.go           Hierarchy queries — GetHubs/Projects/Folders/Items; allPages() pagination
 │   ├── details.go           GetItemDetails(), ItemDetails, VersionSummary, parseTime()
+│   ├── refs.go              Cross-reference queries: GetOccurrences, GetWhereUsed,
+│   │                        GetDrawingsForDesign, GetDrawingSource (Uses/WhereUsed/Drawings tabs)
+│   ├── locate.go            GetItemLocation — project + folder ancestry walk for Show in Location
 │   ├── download.go          RequestSTEPDerivative(), DownloadFile(), StepDownloadPath()
-│   └── debug.go             dbgLog() (in-memory ring + stderr mirror), DebugLines(), DebugEnabled()
+│   └── debug.go             dbgLog (in-memory ring + debug.log file + stderr if redirected),
+│                            DebugLines(), DebugEnabled(), DebugLogPath()
 │
 ├── fusion/
 │   └── mcp.go               Fusion desktop MCP client (open / insert document)
 │
 ├── ui/
-│   ├── app.go               Model, Init, Update, View; all state/nav/render logic
-│   ├── keys.go              keyMap, keys var
-│   └── styles.go            colorTheme, themes[], applyTheme(), cycleTheme()
+│   ├── app.go               Model, Init, Update, View; nav + tab + Show-in-Location orchestration
+│   ├── keys.go              keyMap, keys var (1-4 tab select, Tab/Shift+Tab cycle, Enter activate)
+│   └── styles.go            colorTheme, themes[], applyTheme(), cycleTheme(), tab strip styles
 │
 ├── internal/testutil/       Shared test fakes — GraphQLServer, NewMCPServer
 │   ├── graphql.go           In-process APS GraphQL fake (httptest.Server)
 │   └── mcp.go               In-process Fusion MCP JSON-RPC fake
 │
-├── docs/                    This documentation
+├── docs/                    User + developer documentation
+│   ├── api.md               GraphQL queries, retry behaviour, debug logging
+│   ├── architecture.md      This file — C4 diagrams, packages, data flow
+│   ├── authentication.md    OAuth PKCE flow
+│   ├── debugging.md         End-user defect-submission guide
+│   ├── development.md       Build, release, dependencies
+│   ├── navigation.md        Browser, tabs, Show-in-Location, mouse, themes
+│   └── testing.md           Three-layer test strategy + how to extend
+│
 ├── SECURITY-TODO.md         Pending security follow-ups (M1, M3, L1–L5)
 ├── .goreleaser.yaml         Build + release pipeline (goreleaser v2)
 └── .github/workflows/

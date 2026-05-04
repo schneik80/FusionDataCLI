@@ -121,6 +121,21 @@ stateDiagram-v2
 | `?` | Open debug log overlay |
 | `q` `Ctrl+C` | Quit |
 
+### Details-pane tabs
+
+The details panel switches between four tabs that expose cross-references for the selected item. Tabs are lazily fetched on first activation and cached per item for the rest of the session. See [Details-pane tabs](#details-pane-tabs-1) below for the full behavior.
+
+| Key | Action |
+|-----|--------|
+| `1` | Details tab |
+| `2` | Uses tab |
+| `3` | Where Used tab (DesignItem only) |
+| `4` | Drawings tab (DesignItem only) |
+| `Tab` | Cycle to next available tab |
+| `Shift+Tab` | Cycle to previous available tab |
+| `↑` `↓` / `j` `k` (on a non-Details tab) | Move the tab cursor — *replaces* nav-column cursor while a non-Details tab is active |
+| `Enter` (on a non-Details tab) | **Show in Location** for the highlighted row |
+
 ### Mouse
 
 Mouse support is enabled by default and can be toggled with `m`. The footer bar reflects the current state (`mouse:on` / `mouse:off`).
@@ -130,6 +145,8 @@ Mouse support is enabled by default and can be toggled with `m`. The footer bar 
 | Left click (Projects) | Select and navigate into project |
 | Left click (Contents - folder) | Select and drill into folder |
 | Left click (Contents - document) | Select and load details |
+| Left click (non-Details tab row) | Highlight the row (move tab cursor) |
+| Double-click (non-Details tab row) | **Show in Location** — same as `Enter` |
 | Scroll wheel | Move cursor up/down in active column |
 | Scroll wheel (overlays) | Scroll hub list, about, or debug views |
 
@@ -354,7 +371,7 @@ The System theme uses ANSI color token numbers rather than hex values, so it inh
 
 The details panel sits alongside the browser columns and auto-loads whenever the cursor lands on a document item (design, drawing, or configured design). When the cursor moves to a container (project / folder) the panel clears. Re-visiting a previously-loaded item is served instantly from the in-memory `detailsCache` — no API call is made.
 
-**Fields shown:**
+**Fields shown (Details tab):**
 
 | Section | Fields |
 |---------|--------|
@@ -366,3 +383,96 @@ The details panel sits alongside the browser columns and auto-loads whenever the
 | Versions | Up to 10 most recent versions — version number, date, author, save comment |
 
 Version history is displayed newest-first. The `itemVersions` query returns them oldest-first; the UI reverses the slice.
+
+---
+
+## Details-pane tabs
+
+For documents the details column has a tab strip that swaps the body between four cross-references. The strip auto-narrows to abbreviated labels (`Det / Uses / WUsed / Dwg`) when the column can't fit the full set, and tabs that don't apply to the current item type are hidden entirely.
+
+```
+╭────────────────────────────────────────╮
+│ Details │ Uses │ Where Used │ Drawings │
+│                                        │
+│ Spur Gear Cover - Rear                 │
+│   in 2021-02.f3d                       │
+│ Locknut M2.5  PN-000060                │
+│   in Locknut M2.5.f3d                  │
+│ ISO 7089 - 3 Steel 100 HV Plain        │
+│   in ISO 7089 - 3 Steel 100 HV Plain   │
+│   ↓ 19 more                            │
+│                                        │
+│ [o] web  [f] open  [i] insert  [d] step│
+│ [1-4] tabs                             │
+╰────────────────────────────────────────╯
+```
+
+### Per-item-type tab visibility
+
+| Item type | Tabs available | Notes |
+|---|---|---|
+| `DesignItem` (with `tipRootComponentVersion`) | Details, Uses, Where Used, Drawings | Full set |
+| `DrawingItem` | Details, Uses | Uses = source design (the design the drawing was made from) |
+| `ConfiguredDesignItem` | (none — simple Details view, no strip) | The strip is hidden so the panel falls back to the basic title |
+| `BasicItem` (everything else: STEP imports, .max, .par, …) | (none) | Same as above |
+
+### What each tab returns
+
+| Tab | Source | Cache key | API |
+|-----|--------|-----------|-----|
+| **Details** | Eagerly fetched the moment an item is selected; no extra round trip on activation | item ID | `GetItemDetails` |
+| **Uses** (DesignItem) | The immediate sub-component versions (occurrences) of the design's tip root component version | `tipRootComponentVersion.id` | `GetOccurrences` |
+| **Uses** (DrawingItem) | The source design referenced by the drawing's tip drawing version | drawing item ID | `GetDrawingSource` |
+| **Where Used** | Component versions that reference the design's tip root, deduped by parent DesignItem so each containing design appears once regardless of how many of its versions reference the component | `tipRootComponentVersion.id` | `GetWhereUsed` |
+| **Drawings** | Drawings made from any version of the design, deduped by drawing lineage URN, sorted by latest modification first | design item ID | `GetDrawingsForDesign` |
+
+### Tab cursor and Show in Location
+
+While a non-Details tab is active, the cursor moves *within the tab list* instead of the Contents column. To resume Contents nav, press `1` to return to the Details tab.
+
+`Enter` (or double-click) on a highlighted tab row triggers **Show in Location** — a multi-step navigation that lands the Contents column on the row's underlying item:
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant M as Model
+    participant API as api package
+    participant APS as APS GraphQL
+
+    U->>M: Enter / double-click on a tab row
+    M->>API: GetItemLocation(hubId, itemId)
+    API->>APS: item(hubId, itemId) { project, parentFolder { id name } }
+    APS-->>API: project metadata + immediate parent
+    loop walk parentFolder up the chain
+        API->>APS: folderByHubId(hubId, folderId) { parentFolder }
+        APS-->>API: next ancestor or null
+    end
+    API-->>M: ItemLocation { project, [F-root … F-leaf], hubId }
+
+    M->>M: switch project cursor; queue pendingNav { folders, targetItemId }
+    M->>API: loadProjectContentsCmd(project)
+    API-->>M: contentsLoadedMsg { items }
+
+    loop drill folders[0…N]
+        M->>M: cursor lands on next folder; push folderStack
+        M->>API: loadItemsCmd(hubId, folderId)
+        API-->>M: contentsLoadedMsg { items }
+    end
+
+    M->>M: cursor lands on targetItemId in the leaf folder; pendingNav cleared
+    M->>API: loadDetailsCmd (auto-load details for the located item)
+```
+
+**Friendly fall-throughs:**
+
+- If the located item lives in a different hub, the status bar shows `Item is in another hub (project: <name>)` and the user stays put.
+- If the project isn't visible to the user (e.g. permissions revoked), the status bar shows `Item is in a project not visible here: <name>`.
+- If a folder in the chain isn't found in the parent's contents (rare; typically a stale ancestor URN), the drill stops, the status bar shows `Folder not found in contents: <name>`, and the cursor rests at the deepest folder that did resolve.
+
+### Caching and invalidation
+
+All four tabs share the same per-item invalidation rules as the existing `detailsCache`:
+
+- **Hub change** (re-select via `h`) — every tab cache is cleared. The new hub's items have different URNs.
+- **Refresh** (`r`) — every tab cache is cleared and the active tab refetches.
+- **Item change** (cursor moves to another design / drawing) — caches survive (they're keyed by item, not by selection), but per-tab loading flags, errors, cursor, and scroll reset to zero. The active tab persists across item changes so a "scan Where Used across these designs" workflow works without re-pressing the tab key per item.
