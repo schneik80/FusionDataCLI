@@ -46,6 +46,8 @@ fusiondatacli
 
 On first run the app opens your browser for Autodesk sign-in. After authenticating, navigate with keyboard or mouse:
 
+### Browser
+
 | Key | Action |
 |-----|--------|
 | `↑` `↓` / `j` `k` | Move cursor |
@@ -62,6 +64,21 @@ On first run the app opens your browser for Autodesk sign-in. After authenticati
 | `r` | Refresh |
 | `?` | Debug log |
 | `q` | Quit |
+
+### Details-pane tabs
+
+Selecting a design or drawing opens the details panel. The strip across the top exposes cross-references for that item:
+
+| Key | Tab | Available on |
+|-----|-----|--------------|
+| `1` | Details | All documents |
+| `2` | Uses — sub-components (designs) or source design (drawings) | DesignItem, DrawingItem |
+| `3` | Where Used — designs that reference this component | DesignItem only |
+| `4` | Drawings — drawings made from this design | DesignItem only |
+| `Tab` / `Shift+Tab` | Cycle through the available tabs | — |
+| `↑` `↓` / `j` `k` (on a non-Details tab) | Move the tab cursor | — |
+| `Enter` (on a non-Details tab) | **Show in Location** — jump the Contents column to the highlighted row's project + folder + item | — |
+| Double-click (on a non-Details tab) | Same as Enter | — |
 
 ### Mouse support
 
@@ -148,15 +165,25 @@ make dev
 APS_CLIENT_ID=your-client-id ./fusiondatacli
 ```
 
-## Development
+## Documentation
 
-See [`docs/development.md`](docs/development.md) for the full guide — APS app registration, configuration layering, project structure, debug mode, dependencies, and the goreleaser + macOS `.pkg` release pipeline.
+| Doc | What it covers |
+|---|---|
+| [`docs/navigation.md`](docs/navigation.md) | Three-column browser, details-pane tabs, Show in Location, mouse, themes |
+| [`docs/api.md`](docs/api.md) | APS Manufacturing Data Model GraphQL queries, retry behaviour, debug logging |
+| [`docs/authentication.md`](docs/authentication.md) | OAuth PKCE flow, token storage, refresh |
+| [`docs/architecture.md`](docs/architecture.md) | C4 diagrams, package layout, data flow, performance, resilience |
+| [`docs/debugging.md`](docs/debugging.md) | **Reporting a bug** — what to capture and how to file it |
+| [`docs/testing.md`](docs/testing.md) | Test strategy and how to run / extend the suite |
+| [`docs/development.md`](docs/development.md) | Building from source, release pipeline, dependencies |
+
+## Development
 
 ```sh
 make check       # go vet ./... + go test -race ./...
 ```
 
-`make check` runs the same vet + race-tested suite that CI runs on every pull request and push to `main` (`.github/workflows/test.yml`). The full suite finishes in under five seconds.
+`make check` runs the same vet + race-tested suite that CI runs on every pull request and push to `main` (`.github/workflows/test.yml`). The full suite finishes in under five seconds. See [`docs/testing.md`](docs/testing.md) for the test architecture.
 
 ## License
 

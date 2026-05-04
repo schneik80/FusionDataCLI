@@ -76,7 +76,13 @@ type gqlRequest struct {
 }
 
 type gqlError struct {
-	Message    string `json:"message"`
+	Message string `json:"message"`
+	// Path is the location of the error in the GraphQL response. Per spec
+	// it is a list of strings (field names) and ints (array indices), so
+	// we decode as []any. Path length is used to distinguish root-level
+	// failures (the data is unusable) from leaf-level failures (the data
+	// list still works, just one cell is null).
+	Path       []any `json:"path"`
 	Extensions struct {
 		Code      string `json:"code"`
 		ErrorType string `json:"errorType"`
@@ -167,18 +173,33 @@ func gqlQueryOnce(ctx context.Context, token string, body []byte, vars map[strin
 	if err := json.Unmarshal(raw, &gr); err != nil {
 		return nil, fmt.Errorf("parsing GraphQL response: %w", err), false
 	}
+	hasData := len(gr.Data) > 0 && string(gr.Data) != "null"
 	if len(gr.Errors) > 0 {
 		msgs := make([]string, len(gr.Errors))
+		// Retry only when an UNKNOWN-flavoured error nullifies the data
+		// at or near the root (path depth ≤ 2). Deep field-level errors
+		// (e.g. one item's fusionWebUrl is unreachable because its owning
+		// project was deactivated) leave the surrounding result list
+		// usable, so retrying is wasteful — the next attempt produces
+		// the same partial response.
 		retriable := false
 		for i, e := range gr.Errors {
 			msgs[i] = e.Message
-			if e.Extensions.ErrorType == "UNKNOWN" {
+			if e.Extensions.ErrorType == "UNKNOWN" && len(e.Path) <= 2 {
 				retriable = true
 			}
 		}
+		// Surface partial data: if the response contains usable content
+		// (data is non-null and we aren't going to retry), pass it
+		// through. The errors are still recorded in the debug log via
+		// the response dump above, so they're not lost.
+		if !retriable && hasData {
+			dbgLog("GraphQL partial errors (kept data): %s", strings.Join(msgs, "; "))
+			return gr.Data, nil, false
+		}
 		return nil, fmt.Errorf("GraphQL errors: %s", strings.Join(msgs, "; ")), retriable
 	}
-	if len(gr.Data) == 0 {
+	if !hasData {
 		return nil, fmt.Errorf("empty GraphQL response (HTTP %d): %s", resp.StatusCode, raw), false
 	}
 	return gr.Data, nil, false

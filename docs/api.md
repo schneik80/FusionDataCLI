@@ -21,14 +21,21 @@ The `X-Ads-Region` header is only sent when a non-default region is configured. 
 
 ```mermaid
 flowchart TD
-    caller["Caller\n(ui package)"] --> fn["GetHubs / GetProjects\n/ GetFolders / GetItems\n/ GetItemDetails"]
-    fn --> ap["allPages()\npagination loop"]
+    caller["Caller\n(ui package)"] --> hierarchy["Hierarchy queries\nGetHubs / GetProjects /\nGetFolders / GetItems /\nGetProjectItems"]
+    caller --> details["Per-item queries\nGetItemDetails"]
+    caller --> tabs["Cross-reference queries\nGetOccurrences (Uses)\nGetWhereUsed\nGetDrawingsForDesign\nGetDrawingSource (drawing → design)"]
+    caller --> locate["Locate query\nGetItemLocation\n(walks parentFolder chain)"]
+
+    hierarchy --> ap["allPages()\npagination loop"]
+    tabs --> ap
+    details --> gql
+    locate --> gql
+
     ap --> gql["gqlQuery()\nretry loop\n(0 → 500ms → 1.5s)"]
     gql --> once["gqlQueryOnce()\nsingle HTTP round-trip\n+ JSON decode"]
     once --> http["net/http\nPOST /mfg/graphql"]
-    once --> debug["dbgLog()\noptional request/response dump\n(also mirrored to stderr)"]
+    once --> debug["dbgLog()\nin-memory ring buffer\n+ debug.log file\n+ stderr if redirected"]
     ap --> extract["extract() callback\npage-specific JSON unmarshal"]
-    fn --> navItem["navItemFromTypename()\ntype → NavItem.Kind"]
 ```
 
 ---
@@ -393,6 +400,143 @@ type VersionSummary struct {
 
 ---
 
+## Cross-reference Queries (Details-pane tabs)
+
+The Uses, Where Used, and Drawings tabs each call a dedicated query in `api/refs.go`. Drawings have their own `GetDrawingSource` for the Uses tab because their relationship to a source design is rooted differently in the schema.
+
+### GetOccurrences — Uses tab on a DesignItem
+
+```graphql
+query GetOccurrences($cvId: ID!) {
+  componentVersion(componentVersionId: $cvId) {
+    occurrences(pagination: { limit: 50 }) {
+      pagination { cursor }
+      results {
+        id
+        componentVersion {
+          id name partNumber partDescription materialName
+          designItemVersion { item { id name fusionWebUrl } }
+        }
+      }
+    }
+  }
+}
+```
+
+Returns `[]ComponentRef` — one row per immediate sub-component instance. Note this is *occurrences* (one row per instance in the assembly), not *unique components* — a design with five identical bolts shows five rows.
+
+### GetWhereUsed — designs that reference this component
+
+```graphql
+query GetWhereUsed($cvId: ID!) {
+  componentVersion(componentVersionId: $cvId) {
+    whereUsed(pagination: { limit: 50 }) {
+      pagination { cursor }
+      results {
+        id name partNumber partDescription materialName
+        designItemVersion { item { id name fusionWebUrl } }
+      }
+    }
+  }
+}
+```
+
+APS returns one `ComponentVersion` per *version* of each parent design that references the queried component. The function dedupes by parent `DesignItem.id` so a parent design with N saved versions appears once. Refs whose `designItemVersion.item.id` is empty (orphan component versions) are passed through unchanged.
+
+### GetDrawingsForDesign — Drawings tab on a DesignItem
+
+```graphql
+query GetDrawingsForDesign($hubId: ID!, $itemId: ID!) {
+  item(hubId: $hubId, itemId: $itemId) {
+    ... on DesignItem {
+      versions(pagination: { limit: 10 }) {
+        pagination { cursor }
+        results {
+          drawingItemVersions(pagination: { limit: 5 }) {
+            results {
+              lastModifiedOn
+              lastModifiedBy { firstName lastName }
+              item { id name fusionWebUrl }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+The query is rooted at the **DesignItem**, not the tip-root component version, because Fusion drawings reference a *specific version* of the source component — when the design is saved, the tip-root cvid changes but the drawing keeps pointing at the older one. `componentVersion(tipRoot).drawingVersions` returns empty for any design that has been edited since its drawing was created.
+
+The `versions` field is paginated (10 per round trip) because APS caps query complexity at 1000 points and the original 50×50 layout scored 23000+. Within each design version, up to 5 drawing-item-versions are pulled — covers the realistic case (most designs have 1–2 drawings, very few have >5 against the same version).
+
+Results are deduped by drawing lineage URN (`item.id`), keeping the most-recently-modified entry's metadata. The list is returned newest-first.
+
+### GetDrawingSource — Uses tab on a DrawingItem
+
+```graphql
+query GetDrawingSource($hubId: ID!, $itemId: ID!) {
+  item(hubId: $hubId, itemId: $itemId) {
+    ... on DrawingItem {
+      tipDrawingVersion {
+        componentVersion {
+          id name partNumber partDescription materialName
+          designItemVersion {
+            item { id name fusionWebUrl }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Returns `[]ComponentRef` of length 0 or 1 (typically 1 — most drawings have a single source design). Uses the tip drawing version; older drawing versions that pointed at different designs are not surfaced (rare edge case).
+
+### GetItemLocation — Show in Location
+
+```graphql
+# 1. Item's project + immediate parent folder
+query LocateItem($hubId: ID!, $itemId: ID!) {
+  item(hubId: $hubId, itemId: $itemId) {
+    project {
+      id name
+      hub { id }
+      alternativeIdentifiers { dataManagementAPIProjectId }
+    }
+    parentFolder { id name }
+  }
+}
+
+# 2. Walk parentFolder up to the project root, one query per level
+query GetFolderParent($hubId: ID!, $folderId: ID!) {
+  folderByHubId(hubId: $hubId, folderId: $folderId) {
+    parentFolder { id name }
+  }
+}
+```
+
+Returns `*ItemLocation` containing the project (id, name, altID, hub id) and a root→leaf folder path. The walk is iterative (one round trip per ancestor level) and capped at 100 hops as a defence against malformed schema responses with cycles. Typical folder trees are 2–4 levels deep, so the cost is modest.
+
+```go
+type ItemLocation struct {
+    HubID        string
+    ProjectID    string
+    ProjectAltID string
+    ProjectName  string
+    FolderPath   []FolderRef // root → ... → leaf parent; empty if item is in project root
+}
+
+type FolderRef struct {
+    ID   string
+    Name string
+}
+```
+
+The UI consumes this in `handleItemLocation` to: (1) verify the hub matches the current selection, (2) find the project in `m.cols[colProjects]` and move the cursor, (3) queue a `pendingNavState` with the folder chain, (4) drill folder-by-folder via `loadItemsCmd` until the leaf, (5) place the cursor on the target item. See [`docs/navigation.md`](navigation.md#tab-cursor-and-show-in-location) for the user-visible flow.
+
+---
+
 ## Timestamp Parsing
 
 The API returns timestamps in ISO-8601 format. Two formats are handled:
@@ -465,11 +609,18 @@ If the call is still failing after 3 attempts, the wrapped error reads `APS Grap
 Set `APSNAV_DEBUG=1` before running to enable full request/response logging:
 
 ```sh
-APSNAV_DEBUG=1 fusiondatacli            # in-app overlay only
-APSNAV_DEBUG=1 fusiondatacli 2> log     # also captured to file via stderr
+APSNAV_DEBUG=1 fusiondatacli
 ```
 
-Logs are stored in memory (rolling buffer, max 500 lines) and displayed via the `?` overlay from `stateBrowsing`. Each entry is **also mirrored to stderr** when debug is enabled, so the log can be captured to a file even when the in-app overlay is unreachable (e.g. from `stateError`). BubbleTea uses the alternate screen buffer, so stderr writes do not smear the TUI.
+Logs are written to **three sinks**:
+
+1. **In-memory ring buffer** (max 500 lines) — viewed via the `?` overlay from `stateBrowsing`. The overlay shows the current log file path at the top so the user knows where to grab the text from (the rendered overlay text itself is not selectable).
+2. **`~/.config/fusiondatacli/debug.log`** — opened with `O_TRUNC` on each session start, mode 0600. The path comes from `config.Dir()`. Tail / grep / open in an editor with standard tools while the TUI is running.
+3. **Stderr** — *only* when stderr has been redirected (file or pipe). Detected at startup via `os.Stderr.Stat()`'s `ModeCharDevice` bit; when stderr is the terminal, writing to it would smear bubbletea's alternate-screen render, so the mirror is suppressed in that case. When you want stderr capture explicitly, redirect:
+
+   ```sh
+   APSNAV_DEBUG=1 fusiondatacli 2> debug.log
+   ```
 
 Each log entry includes:
 - Query name and variables
@@ -477,7 +628,7 @@ Each log entry includes:
 - Raw JSON response body
 - `RETRY attempt=N delay=… lastErr=…` lines whenever the bounded-retry loop kicks in
 
-Debug logs are **not** written to disk by the app itself, and do not include Authorization header values.
+Authorization headers are never logged. The on-disk log file is mode 0600.
 
 ---
 

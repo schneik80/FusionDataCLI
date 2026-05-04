@@ -44,6 +44,49 @@ const (
 	numCols     = 2
 )
 
+// Details-pane tabs. tabDetails is the existing metadata view; the other
+// three are component-level cross-references on the selected design's
+// tipRootComponentVersion. They are only meaningful for DesignItems with a
+// populated RootComponentVersionID — for other item kinds the tab strip
+// is hidden and only the Details view renders.
+type detailsTab int
+
+const (
+	tabDetails detailsTab = iota
+	tabUses
+	tabWhereUsed
+	tabDrawings
+	numDetailsTabs
+)
+
+func (t detailsTab) label() string {
+	switch t {
+	case tabDetails:
+		return "Details"
+	case tabUses:
+		return "Uses"
+	case tabWhereUsed:
+		return "Where Used"
+	case tabDrawings:
+		return "Drawings"
+	}
+	return "?"
+}
+
+func (t detailsTab) labelShort() string {
+	switch t {
+	case tabDetails:
+		return "Det"
+	case tabUses:
+		return "Uses"
+	case tabWhereUsed:
+		return "WUsed"
+	case tabDrawings:
+		return "Dwg"
+	}
+	return "?"
+}
+
 // ---------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------
@@ -54,6 +97,25 @@ type (
 	projectsLoadedMsg  struct{ items []api.NavItem }
 	contentsLoadedMsg  struct{ items []api.NavItem }
 	detailsLoadedMsg   struct{ details *api.ItemDetails }
+	// usesLoadedMsg / whereUsedLoadedMsg / drawingsLoadedMsg deliver the
+	// async result of a per-tab fetch. cvid identifies which component
+	// version the data is for, so a stale response that arrives after the
+	// user has navigated away can still be cached without overwriting
+	// state for the new selection.
+	usesLoadedMsg      struct{ cvid string; items []api.ComponentRef; err error }
+	whereUsedLoadedMsg struct{ cvid string; items []api.ComponentRef; err error }
+	// drawingsLoadedMsg key is the DesignItem.id (lineage URN), not a
+	// component-version id — drawings are aggregated across all versions
+	// of the design, so we cache by the stable item identity.
+	drawingsLoadedMsg  struct{ itemID string; items []api.DrawingRef;   err error }
+	// itemLocationLoadedMsg is the result of GetItemLocation, used to
+	// orchestrate "Show in Location" navigation from the Uses /
+	// Where Used / Drawings tabs into the Contents column.
+	itemLocationLoadedMsg struct {
+		loc    *api.ItemLocation
+		target string // original requested itemID — used to position cursor at end
+		err    error
+	}
 	errMsg            struct{ err error }
 	// openedBrowserMsg reports the URL that was handed to the OS browser
 	// handler so the status bar can display it (useful when the target
@@ -98,6 +160,20 @@ type breadcrumbEntry struct {
 	name string
 }
 
+// pendingNavState orchestrates the multi-step Show-in-Location flow.
+// Folders are stored root → leaf; each contentsLoadedMsg consumes one
+// hop until the slice is empty, then the cursor is placed on
+// targetItemID inside the resulting folder.
+type pendingNavState struct {
+	targetItemID string
+	folders      []api.FolderRef
+}
+
+// doubleClickWindow is how recent the previous click on the same row
+// must have been to count as a double-click. 500 ms is the conventional
+// threshold across most desktop environments.
+const doubleClickWindow = 500 * time.Millisecond
+
 // Model is the root bubbletea model for the apsnav browser.
 type Model struct {
 	state    appState
@@ -139,6 +215,44 @@ type Model struct {
 	// can be served synchronously without an API call. Refresh ([r]) and
 	// hub re-selection clear the map to force a re-fetch.
 	detailsCache map[string]*api.ItemDetails
+
+	// Active tab in the details pane. Preserved when arrowing between
+	// items in the same hub so a "scan Where Used across these designs"
+	// flow works without re-pressing the tab key per item.
+	detailsTab detailsTab
+	// Per-tab loading flags (true while a fetch is in flight for the
+	// currently-selected component version). Keyed by tab index.
+	tabLoading [numDetailsTabs]bool
+	// Per-tab last error message. Cleared on successful fetch or on
+	// item change. Shown verbatim in the tab content area.
+	tabErr [numDetailsTabs]string
+	// Per-tab caches keyed by ComponentVersion.id. The cvid is whatever
+	// m.details.RootComponentVersionID was when the fetch started, so
+	// async responses arriving after a navigation are still stored under
+	// the right key and don't pollute the active item's view.
+	usesCache      map[string][]api.ComponentRef
+	whereUsedCache map[string][]api.ComponentRef
+	drawingsCache  map[string][]api.DrawingRef
+
+	// Per-tab cursor index (only meaningful for tabUses / tabWhereUsed
+	// / tabDrawings — tabDetails has its own scroll inside the details
+	// view). Preserved across tab switches; reset to 0 when the
+	// underlying selection changes.
+	tabCursors [numDetailsTabs]int
+	tabScrolls [numDetailsTabs]int
+
+	// pendingNav drives the multi-step "Show in Location" navigation:
+	// after a locate query returns, the project + folder chain is
+	// queued here; subsequent contentsLoadedMsg handlers consume one
+	// folder per drill until the chain is empty, then position the
+	// cursor on targetItemID.
+	pendingNav *pendingNavState
+
+	// Mouse double-click tracking: a second click at the same logical
+	// position within doubleClickWindow fires the activation action
+	// (Show in Location for tab rows; reserved for future use elsewhere).
+	lastClickKey string
+	lastClickAt  time.Time
 
 	// About / debug overlay scroll
 	aboutScroll int
@@ -253,13 +367,16 @@ func New(cfg *config.Config, cfgErr error, version string) Model {
 
 	if cfgErr != nil {
 		return Model{
-			state:        stateSetupNeeded,
-			err:          cfgErr,
-			spinner:      sp,
-			version:      version,
-			mouseEnabled: true,
-			detailsCache: make(map[string]*api.ItemDetails),
-			styleCache:   &styleCache{},
+			state:          stateSetupNeeded,
+			err:            cfgErr,
+			spinner:        sp,
+			version:        version,
+			mouseEnabled:   true,
+			detailsCache:   make(map[string]*api.ItemDetails),
+			usesCache:      make(map[string][]api.ComponentRef),
+			whereUsedCache: make(map[string][]api.ComponentRef),
+			drawingsCache:  make(map[string][]api.DrawingRef),
+			styleCache:     &styleCache{},
 		}
 	}
 
@@ -270,8 +387,11 @@ func New(cfg *config.Config, cfgErr error, version string) Model {
 		spinner:      sp,
 		version:      version,
 		mouseEnabled: true,
-		detailsCache: make(map[string]*api.ItemDetails),
-		styleCache:   &styleCache{},
+		detailsCache:   make(map[string]*api.ItemDetails),
+		usesCache:      make(map[string][]api.ComponentRef),
+		whereUsedCache: make(map[string][]api.ComponentRef),
+		drawingsCache:  make(map[string][]api.DrawingRef),
+		styleCache:     &styleCache{},
 	}
 }
 
@@ -408,6 +528,64 @@ func loadDetailsCmd(token, hubID, itemID string) tea.Cmd {
 			return errMsg{err}
 		}
 		return detailsLoadedMsg{d}
+	}
+}
+
+// Per-tab fetch commands. cvid is captured into the message so a stale
+// response that arrives after the user navigated to a different item is
+// still cached under the right ComponentVersion id.
+
+func loadUsesCmd(token, cvid string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
+		defer cancel()
+		items, err := api.GetOccurrences(ctx, token, cvid)
+		return usesLoadedMsg{cvid: cvid, items: items, err: err}
+	}
+}
+
+// loadDrawingUsesCmd fetches the source design for a drawing item.
+// "Uses" on a drawing is the design the drawing was made from. The
+// resulting message reuses usesLoadedMsg so the receiver doesn't need
+// to know which underlying API was called — the cvid field carries
+// the drawing item's id (acting as the cache key for this code path).
+func loadDrawingUsesCmd(token, hubID, drawingItemID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
+		defer cancel()
+		items, err := api.GetDrawingSource(ctx, token, hubID, drawingItemID)
+		return usesLoadedMsg{cvid: drawingItemID, items: items, err: err}
+	}
+}
+
+func loadWhereUsedCmd(token, cvid string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
+		defer cancel()
+		items, err := api.GetWhereUsed(ctx, token, cvid)
+		return whereUsedLoadedMsg{cvid: cvid, items: items, err: err}
+	}
+}
+
+func loadDrawingsCmd(token, hubID, itemID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
+		defer cancel()
+		items, err := api.GetDrawingsForDesign(ctx, token, hubID, itemID)
+		return drawingsLoadedMsg{itemID: itemID, items: items, err: err}
+	}
+}
+
+// locateItemCmd resolves an item's project + folder ancestry so the
+// Update loop can orchestrate the Show-in-Location navigation.
+func locateItemCmd(token, hubID, itemID string) tea.Cmd {
+	return func() tea.Msg {
+		// Locate may fan out into many folder-walk requests; allow a
+		// generous timeout above the per-call nav budget.
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		loc, err := api.GetItemLocation(ctx, token, hubID, itemID)
+		return itemLocationLoadedMsg{loc: loc, target: itemID, err: err}
 	}
 }
 
@@ -608,20 +786,64 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cols[colContents] = msg.items
 		m.cursors[colContents] = 0
 		m.scrolls[colContents] = 0
-		// Auto-load details for the first item.
-		if len(msg.items) > 0 && !msg.items[0].IsContainer && m.selectedHubID != "" {
+
+		// Show-in-Location orchestration. When pendingNav is set we are
+		// in a multi-step nav: each contentsLoadedMsg either drills the
+		// next folder in the queue or — when the queue is empty —
+		// positions the cursor on the target item.
+		if m.pendingNav != nil {
+			if len(m.pendingNav.folders) > 0 {
+				target := m.pendingNav.folders[0]
+				m.pendingNav.folders = m.pendingNav.folders[1:]
+				for i, it := range msg.items {
+					if it.ID == target.ID && it.IsContainer {
+						m.cursors[colContents] = i
+						m.adjustScroll(colContents)
+						m.folderStack = append(m.folderStack, breadcrumbEntry{id: target.ID, name: target.Name})
+						m.cols[colContents] = nil
+						m.loading[colContents] = true
+						return m, loadItemsCmd(m.token, m.selectedHubID, target.ID)
+					}
+				}
+				// Folder chain broken (could happen if APS returned a
+				// folder ID that isn't actually visible to this user) —
+				// surface the failure and fall through to the
+				// auto-details path so we still render *something*.
+				m.statusMsg = "Folder not found in contents: " + target.Name
+				m.pendingNav = nil
+			} else {
+				for i, it := range msg.items {
+					if it.ID == m.pendingNav.targetItemID {
+						m.cursors[colContents] = i
+						m.adjustScroll(colContents)
+						break
+					}
+				}
+				m.pendingNav = nil
+			}
+		}
+
+		// Auto-load details for whatever item the cursor now points at.
+		// Without pendingNav this is index 0 (the original behavior);
+		// with pendingNav it's the located target.
+		cur := m.cursors[colContents]
+		if cur < len(msg.items) && !msg.items[cur].IsContainer && m.selectedHubID != "" {
 			m.detailsScroll = 0
-			if cached, ok := m.detailsCache[msg.items[0].ID]; ok && cached != nil {
+			m.resetTabState()
+			if cached, ok := m.detailsCache[msg.items[cur].ID]; ok && cached != nil {
 				m.details = cached
 				m.detailsLoading = false
-				return m, nil
+				return m, m.maybeLoadActiveTab()
 			}
 			m.detailsLoading = true
 			m.details = nil
-			return m, loadDetailsCmd(m.token, m.selectedHubID, msg.items[0].ID)
+			return m, loadDetailsCmd(m.token, m.selectedHubID, msg.items[cur].ID)
 		}
 		m.details = nil
 		return m, nil
+
+	case itemLocationLoadedMsg:
+		return m.handleItemLocation(msg)
 
 	case detailsLoadedMsg:
 		m.detailsLoading = false
@@ -629,6 +851,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detailsScroll = 0
 		if msg.details != nil && msg.details.ID != "" {
 			m.detailsCache[msg.details.ID] = msg.details
+		}
+		// Reset per-tab error/loading flags — they applied to the
+		// previous selection — and kick off a fetch for the active
+		// tab if it isn't Details and the new cvid isn't cached.
+		m.resetTabState()
+		return m, m.maybeLoadActiveTab()
+
+	case usesLoadedMsg:
+		if msg.err == nil && m.usesCache != nil {
+			m.usesCache[msg.cvid] = msg.items
+		}
+		// usesCacheKey() returns whatever string the active item uses
+		// to key its Uses entry — DesignItem.RootComponentVersionID
+		// for designs, DesignItem.ID for drawings. The response's
+		// msg.cvid carries the same string the load command sent, so
+		// matching here confirms the response is for the current item.
+		if m.details != nil && m.usesCacheKey() == msg.cvid {
+			m.tabLoading[tabUses] = false
+			if msg.err != nil {
+				m.tabErr[tabUses] = msg.err.Error()
+			} else {
+				m.tabErr[tabUses] = ""
+			}
+		}
+		return m, nil
+
+	case whereUsedLoadedMsg:
+		if msg.err == nil && m.whereUsedCache != nil {
+			m.whereUsedCache[msg.cvid] = msg.items
+		}
+		if m.details != nil && m.details.RootComponentVersionID == msg.cvid {
+			m.tabLoading[tabWhereUsed] = false
+			if msg.err != nil {
+				m.tabErr[tabWhereUsed] = msg.err.Error()
+			} else {
+				m.tabErr[tabWhereUsed] = ""
+			}
+		}
+		return m, nil
+
+	case drawingsLoadedMsg:
+		if msg.err == nil && m.drawingsCache != nil {
+			m.drawingsCache[msg.itemID] = msg.items
+		}
+		if m.details != nil && m.details.ID == msg.itemID {
+			m.tabLoading[tabDrawings] = false
+			if msg.err != nil {
+				m.tabErr[tabDrawings] = msg.err.Error()
+			} else {
+				m.tabErr[tabDrawings] = ""
+			}
 		}
 		return m, nil
 
@@ -790,11 +1063,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, keys.Up):
+		// On a non-Details tab, ↑/↓ drive the tab's row cursor instead
+		// of the Contents column. Switch back to Details (key 1) to
+		// resume normal nav.
+		if m.tabsAvailable() && m.detailsTab != tabDetails {
+			m.moveTabCursor(-1)
+			return m, nil
+		}
 		m.moveCursor(-1)
 		m.detailsScroll = 0
 		return m, m.maybeLoadDetails()
 
 	case key.Matches(msg, keys.Down):
+		if m.tabsAvailable() && m.detailsTab != tabDetails {
+			m.moveTabCursor(1)
+			return m, nil
+		}
 		m.moveCursor(1)
 		m.detailsScroll = 0
 		return m, m.maybeLoadDetails()
@@ -802,7 +1086,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Left):
 		return m.navigateLeft()
 
-	case key.Matches(msg, keys.Right), key.Matches(msg, keys.Enter):
+	case key.Matches(msg, keys.Enter):
+		// Enter activates: on a non-Details tab → Show in Location for
+		// the highlighted row; otherwise the existing nav-right
+		// behavior (drill into the selected folder/project).
+		if m.tabsAvailable() && m.detailsTab != tabDetails {
+			return m.showInLocation()
+		}
+		return m.navigateRight()
+
+	case key.Matches(msg, keys.Right):
 		return m.navigateRight()
 
 	case key.Matches(msg, keys.Open):
@@ -834,6 +1127,25 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.statusMsg = "Mouse: off"
 		return m, tea.DisableMouse
+
+	case key.Matches(msg, keys.TabSelect):
+		switch msg.String() {
+		case "1":
+			return m.selectTab(tabDetails)
+		case "2":
+			return m.selectTab(tabUses)
+		case "3":
+			return m.selectTab(tabWhereUsed)
+		case "4":
+			return m.selectTab(tabDrawings)
+		}
+		return m, nil
+
+	case key.Matches(msg, keys.TabNext):
+		return m.selectTab(m.cycleTab(1))
+
+	case key.Matches(msg, keys.TabPrev):
+		return m.selectTab(m.cycleTab(-1))
 	}
 
 	return m, nil
@@ -923,6 +1235,39 @@ func (m Model) mouseClick(x, y int) (tea.Model, tea.Cmd) {
 		colWidth = 10
 	}
 
+	// Y layout: header(1) + border-top(1) + title-row(1) + padding = first item at y=4.
+	const firstItemY = 4
+
+	// Details column starts after the two nav columns. Clicks landing in
+	// the details area only matter when a non-Details tab is active —
+	// they let the user single-click to highlight and double-click to
+	// trigger Show in Location.
+	detailsStart := numCols * colWidth
+	if x >= detailsStart && m.tabsAvailable() && m.detailsTab != tabDetails {
+		row := y - firstItemY
+		if row < 0 {
+			return m, nil
+		}
+		// Approximate ref index from line offset: refs render to 1-2
+		// lines each. Half-line resolution is acceptable for click
+		// targeting and matches the scroll heuristic in moveTabCursor.
+		approxRow := m.tabScrolls[m.detailsTab] + row/2
+		rows := m.currentTabRowCount()
+		if approxRow < 0 || approxRow >= rows {
+			return m, nil
+		}
+		clickKey := fmt.Sprintf("tab%d:%d", m.detailsTab, approxRow)
+		now := time.Now()
+		isDouble := m.lastClickKey == clickKey && now.Sub(m.lastClickAt) < doubleClickWindow
+		m.lastClickKey = clickKey
+		m.lastClickAt = now
+		m.tabCursors[m.detailsTab] = approxRow
+		if isDouble {
+			return m.showInLocation()
+		}
+		return m, nil
+	}
+
 	// Each column is rendered with style.Width(colWidth) which is the outer
 	// width (includes border + padding). Columns are placed side-by-side by
 	// lipgloss.JoinHorizontal.
@@ -936,8 +1281,6 @@ func (m Model) mouseClick(x, y int) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Y layout: header(1) + border-top(1) + title-row(1) + padding = first item at y=4.
-	const firstItemY = 4
 	row := y - firstItemY
 
 	if col < 0 {
@@ -957,6 +1300,7 @@ func (m Model) mouseClick(x, y int) (tea.Model, tea.Cmd) {
 	m.cursors[col] = row
 	m.adjustScroll(col)
 	m.detailsScroll = 0
+	m.lastClickKey = "" // any nav-column click breaks the double-click chain
 
 	// For projects column or folders in contents, navigate into the item.
 	// For documents in contents, just load details.
@@ -991,6 +1335,33 @@ func abs(x int) int {
 		return -x
 	}
 	return x
+}
+
+// moveTabCursor moves the active non-Details tab's row cursor by delta,
+// clamped to the tab's row count, and adjusts the per-tab scroll
+// offset so the cursor stays visible.
+func (m *Model) moveTabCursor(delta int) {
+	rows := m.currentTabRowCount()
+	if rows == 0 {
+		m.tabCursors[m.detailsTab] = 0
+		m.tabScrolls[m.detailsTab] = 0
+		return
+	}
+	cur := clamp(m.tabCursors[m.detailsTab]+delta, 0, rows-1)
+	m.tabCursors[m.detailsTab] = cur
+	// Visible rows in the details pane is roughly height - fixed
+	// chrome (header + footer + borders + tab strip + bottom hints).
+	// Use a conservative estimate so the cursor doesn't overshoot.
+	visible := m.height - 9
+	if visible < 1 {
+		visible = 1
+	}
+	scroll := m.tabScrolls[m.detailsTab]
+	if cur < scroll {
+		m.tabScrolls[m.detailsTab] = cur
+	} else if cur >= scroll+visible {
+		m.tabScrolls[m.detailsTab] = cur - visible + 1
+	}
 }
 
 // moveCursor moves the cursor in the active column and adjusts scroll.
@@ -1186,22 +1557,314 @@ func (m Model) navigateRight() (Model, tea.Cmd) {
 	return m, nil
 }
 
+// availableTabs returns the tabs that make sense for the currently
+// selected item. The order is the same as the detailsTab enum so the
+// strip renders left-to-right consistently across item types:
+//
+//   - DesignItem with a tipRootComponentVersion → all four tabs
+//     (Details, Uses, Where Used, Drawings).
+//   - DrawingItem → Details + Uses (the source design). Where Used
+//     and Drawings don't apply to drawings.
+//   - Other item types (BasicItem, ConfiguredDesignItem, no details)
+//     → no tabs; the panel falls back to the simple Details view.
+func (m Model) availableTabs() []detailsTab {
+	if m.details == nil {
+		return nil
+	}
+	switch m.details.Typename {
+	case "DesignItem":
+		if m.details.RootComponentVersionID != "" {
+			return []detailsTab{tabDetails, tabUses, tabWhereUsed, tabDrawings}
+		}
+	case "DrawingItem":
+		return []detailsTab{tabDetails, tabUses}
+	}
+	return nil
+}
+
+// tabsAvailable reports whether the tab strip should be shown for the
+// currently selected item.
+func (m Model) tabsAvailable() bool {
+	return len(m.availableTabs()) > 0
+}
+
+// tabIsAvailable reports whether the given tab applies to the current
+// item. Used by selectTab to silently ignore presses on tabs that are
+// hidden for this item type.
+func (m Model) tabIsAvailable(t detailsTab) bool {
+	for _, a := range m.availableTabs() {
+		if a == t {
+			return true
+		}
+	}
+	return false
+}
+
+// selectTab switches the active details-pane tab. The keypress is a
+// no-op when the tab strip is hidden (no tabs apply to this item) or
+// when the requested tab isn't available for the current item type
+// (e.g. pressing "3" for Where Used while a DrawingItem is selected).
+// Returns the load command for the newly active tab if its data isn't
+// already cached for the current selection.
+func (m Model) selectTab(t detailsTab) (Model, tea.Cmd) {
+	if !m.tabIsAvailable(t) {
+		return m, nil
+	}
+	m.detailsTab = t
+	cmd := m.maybeLoadActiveTab()
+	return m, cmd
+}
+
+// cycleTab returns the next or previous tab in the available list,
+// wrapping around. delta is +1 for forward and -1 for back. Falls back
+// to tabDetails when no tabs apply.
+func (m Model) cycleTab(delta int) detailsTab {
+	avail := m.availableTabs()
+	if len(avail) == 0 {
+		return tabDetails
+	}
+	for i, a := range avail {
+		if a == m.detailsTab {
+			n := (i + delta) % len(avail)
+			if n < 0 {
+				n += len(avail)
+			}
+			return avail[n]
+		}
+	}
+	return avail[0]
+}
+
+// resetTabState clears per-tab loading/error/cursor/scroll values that
+// belong to a specific item selection. Called whenever the underlying
+// item changes (cursor moved to a new design, refresh, hub change).
+// Caches survive — only the per-item view state is wiped.
+func (m *Model) resetTabState() {
+	m.tabLoading = [numDetailsTabs]bool{}
+	m.tabErr = [numDetailsTabs]string{}
+	m.tabCursors = [numDetailsTabs]int{}
+	m.tabScrolls = [numDetailsTabs]int{}
+}
+
+// usesCacheKey returns the cache lookup key for the Uses tab. Two
+// item types use this tab and they key their results differently:
+//
+//   - DesignItem: keyed by tipRootComponentVersion.id, because the
+//     underlying GraphQL query is rooted at that componentVersion.
+//   - DrawingItem: keyed by the DrawingItem lineage URN, because the
+//     drawing's source is stable across the item's versions.
+//
+// usesCache stores both flavours under one map; the keys don't collide
+// because the URN namespaces differ.
+func (m Model) usesCacheKey() string {
+	if m.details == nil {
+		return ""
+	}
+	if m.details.Typename == "DrawingItem" {
+		return m.details.ID
+	}
+	return m.details.RootComponentVersionID
+}
+
+// currentTabRowCount returns the number of rows in the active
+// non-Details tab's content list. Returns 0 when the tab data isn't
+// loaded yet, the tab has no rows, or the active tab is Details.
+func (m Model) currentTabRowCount() int {
+	if m.details == nil {
+		return 0
+	}
+	cvid := m.details.RootComponentVersionID
+	switch m.detailsTab {
+	case tabUses:
+		return len(m.usesCache[m.usesCacheKey()])
+	case tabWhereUsed:
+		return len(m.whereUsedCache[cvid])
+	case tabDrawings:
+		// Drawings cache is keyed by DesignItem.id, not cvid — see
+		// loadDrawingsCmd / GetDrawingsForDesign for why.
+		return len(m.drawingsCache[m.details.ID])
+	}
+	return 0
+}
+
+// showInLocation kicks off Show-in-Location for the row currently
+// highlighted by the tab cursor (the keyboard activator; mouse
+// double-click goes through the same path). For Uses / Where Used the
+// target is the parent DesignItem of the row's component; for Drawings
+// it is the DrawingItem itself.
+func (m Model) showInLocation() (Model, tea.Cmd) {
+	if !m.tabsAvailable() || m.detailsTab == tabDetails || m.details == nil {
+		return m, nil
+	}
+	cvid := m.details.RootComponentVersionID
+	cur := m.tabCursors[m.detailsTab]
+	var targetID, targetName string
+	switch m.detailsTab {
+	case tabUses:
+		items := m.usesCache[m.usesCacheKey()]
+		if cur < 0 || cur >= len(items) {
+			return m, nil
+		}
+		targetID = items[cur].DesignItemID
+		targetName = items[cur].DesignItemName
+		if targetName == "" {
+			targetName = items[cur].Name
+		}
+	case tabWhereUsed:
+		items := m.whereUsedCache[cvid]
+		if cur < 0 || cur >= len(items) {
+			return m, nil
+		}
+		targetID = items[cur].DesignItemID
+		targetName = items[cur].DesignItemName
+		if targetName == "" {
+			targetName = items[cur].Name
+		}
+	case tabDrawings:
+		items := m.drawingsCache[m.details.ID]
+		if cur < 0 || cur >= len(items) {
+			return m, nil
+		}
+		targetID = items[cur].DrawingItemID
+		targetName = items[cur].Name
+	}
+	if targetID == "" {
+		m.statusMsg = "No location available for this row"
+		return m, nil
+	}
+	m.statusMsg = "Locating " + targetName + "…"
+	return m, locateItemCmd(m.token, m.selectedHubID, targetID)
+}
+
+// handleItemLocation processes the locate-query result. If the project
+// is in the current hub and visible to the user, it switches the
+// Project cursor and queues the folder drill via pendingNav. Otherwise
+// it surfaces a friendly status and leaves the user in place.
+func (m Model) handleItemLocation(msg itemLocationLoadedMsg) (Model, tea.Cmd) {
+	if msg.err != nil {
+		m.statusMsg = "Show in Location failed: " + msg.err.Error()
+		return m, nil
+	}
+	loc := msg.loc
+	if loc == nil {
+		m.statusMsg = "Show in Location: no result"
+		return m, nil
+	}
+	if loc.HubID != "" && m.selectedHubID != "" && loc.HubID != m.selectedHubID {
+		m.statusMsg = "Item is in another hub (project: " + loc.ProjectName + ")"
+		return m, nil
+	}
+	projIdx := -1
+	for i, p := range m.cols[colProjects] {
+		if p.ID == loc.ProjectID {
+			projIdx = i
+			break
+		}
+	}
+	if projIdx < 0 {
+		m.statusMsg = "Item is in a project not visible here: " + loc.ProjectName
+		return m, nil
+	}
+	m.cursors[colProjects] = projIdx
+	m.adjustScroll(colProjects)
+	m.activeCol = colContents
+	m.cols[colContents] = nil
+	m.loading[colContents] = true
+	m.folderStack = nil
+	m.selectedProjectAltID = loc.ProjectAltID
+	m.pendingNav = &pendingNavState{
+		targetItemID: msg.target,
+		folders:      append([]api.FolderRef(nil), loc.FolderPath...),
+	}
+	// Switching to Details tab so the cursor change in Contents drives
+	// the existing details auto-load instead of staying on a tab whose
+	// list is about to become stale anyway.
+	m.detailsTab = tabDetails
+	return m, loadProjectContentsCmd(m.token, loc.ProjectID)
+}
+
+// maybeLoadActiveTab returns a fetch command for the active tab if its
+// data isn't yet cached for the current selection. Returns nil if the
+// tab is Details (already loaded eagerly with the item) or the cache
+// hits. Updates loading/error flags on the model.
+func (m *Model) maybeLoadActiveTab() tea.Cmd {
+	if m.details == nil {
+		return nil
+	}
+	switch m.detailsTab {
+	case tabUses:
+		// Uses applies to both DesignItem (sub-components) and
+		// DrawingItem (source design). Cache + load command differ
+		// per item type but share the same usesCache map.
+		key := m.usesCacheKey()
+		if key == "" {
+			return nil
+		}
+		if _, ok := m.usesCache[key]; ok {
+			m.tabLoading[tabUses] = false
+			m.tabErr[tabUses] = ""
+			return nil
+		}
+		m.tabLoading[tabUses] = true
+		m.tabErr[tabUses] = ""
+		if m.details.Typename == "DrawingItem" {
+			return loadDrawingUsesCmd(m.token, m.selectedHubID, key)
+		}
+		return loadUsesCmd(m.token, key)
+	case tabWhereUsed:
+		// Where Used only applies to DesignItems; the strip hides this
+		// tab for other item types so we shouldn't even reach here in
+		// those cases. The empty-cvid guard is defensive.
+		cvid := m.details.RootComponentVersionID
+		if cvid == "" {
+			return nil
+		}
+		if _, ok := m.whereUsedCache[cvid]; ok {
+			m.tabLoading[tabWhereUsed] = false
+			m.tabErr[tabWhereUsed] = ""
+			return nil
+		}
+		m.tabLoading[tabWhereUsed] = true
+		m.tabErr[tabWhereUsed] = ""
+		return loadWhereUsedCmd(m.token, cvid)
+	case tabDrawings:
+		// Drawings cache + load are keyed by DesignItem.id (lineage),
+		// not cvid — see GetDrawingsForDesign for the rationale.
+		itemID := m.details.ID
+		if _, ok := m.drawingsCache[itemID]; ok {
+			m.tabLoading[tabDrawings] = false
+			m.tabErr[tabDrawings] = ""
+			return nil
+		}
+		m.tabLoading[tabDrawings] = true
+		m.tabErr[tabDrawings] = ""
+		return loadDrawingsCmd(m.token, m.selectedHubID, itemID)
+	}
+	return nil
+}
+
 // maybeLoadDetails loads details for the current item if it's a document.
 // If the item's details are already cached from a prior fetch this session,
-// they're served synchronously and no API call is made.
+// they're served synchronously and no API call is made. The active
+// details-pane tab (preserved across item changes) is re-evaluated for
+// the new selection — if it's a non-Details tab and that data isn't
+// cached for the new component version, an additional fetch fires.
 func (m *Model) maybeLoadDetails() tea.Cmd {
 	item := m.selectedItem(m.activeCol)
 	if item == nil || item.IsContainer {
 		m.details = nil
 		m.detailsLoading = false
+		m.resetTabState()
 		return nil
 	}
 	if cached, ok := m.detailsCache[item.ID]; ok && cached != nil {
 		m.details = cached
 		m.detailsLoading = false
-		return nil
+		m.resetTabState()
+		return m.maybeLoadActiveTab()
 	}
 	m.detailsLoading = true
+	m.resetTabState()
 	return loadDetailsCmd(m.token, m.selectedHubID, item.ID)
 }
 
@@ -1321,6 +1984,12 @@ func (m Model) selectedHubName() string {
 // [r] expects fresh data, not whatever was last cached).
 func (m Model) refresh() (Model, tea.Cmd) {
 	m.detailsCache = make(map[string]*api.ItemDetails)
+	m.usesCache = make(map[string][]api.ComponentRef)
+	m.whereUsedCache = make(map[string][]api.ComponentRef)
+	m.drawingsCache = make(map[string][]api.DrawingRef)
+	m.detailsTab = tabDetails
+	m.resetTabState()
+	m.pendingNav = nil
 	switch m.activeCol {
 	case colProjects:
 		if m.selectedHubID == "" {
@@ -1365,6 +2034,15 @@ func (m Model) selectHub() (Model, tea.Cmd) {
 	m.loading[colProjects] = true
 	m.details = nil
 	m.folderStack = nil
+	// Reset details-pane tabs on hub change. The component-version IDs in
+	// the per-tab caches belong to the previous hub's projects and aren't
+	// reachable from the new hub anyway.
+	m.detailsTab = tabDetails
+	m.resetTabState()
+	m.pendingNav = nil
+	m.usesCache = make(map[string][]api.ComponentRef)
+	m.whereUsedCache = make(map[string][]api.ComponentRef)
+	m.drawingsCache = make(map[string][]api.DrawingRef)
 	return m, loadProjectsCmd(m.token, hub.ID)
 }
 
@@ -1536,14 +2214,21 @@ func (m Model) viewDebug() string {
 		return lipgloss.JoinVertical(lipgloss.Left, header, body)
 	}
 
+	// Surface the on-disk log path so users can copy / grep / tail with
+	// standard tools — the in-app overlay text is rendered, not selectable.
+	var pathHint string
+	if p := api.DebugLogPath(); p != "" {
+		pathHint = styleItemDim.Render("  log file: " + p)
+	}
+
 	lines := api.DebugLines()
 	if len(lines) == 0 {
 		body := styleItemDim.Render("\n  No log entries yet.\n")
-		return lipgloss.JoinVertical(lipgloss.Left, header, body)
+		return lipgloss.JoinVertical(lipgloss.Left, header, pathHint, body)
 	}
 
-	// Visible area: full height minus header row
-	visibleH := m.height - 3
+	// Visible area: full height minus header + log-path hint + footer.
+	visibleH := m.height - 4
 	if visibleH < 1 {
 		visibleH = 1
 	}
@@ -1558,7 +2243,7 @@ func (m Model) viewDebug() string {
 	}
 	footer := styleItemDim.Render(fmt.Sprintf("  lines %d–%d of %d", scroll+1, end, len(lines)))
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, sb.String(), footer)
+	return lipgloss.JoinVertical(lipgloss.Left, header, pathHint, sb.String(), footer)
 }
 
 // aboutLinesCache holds the last-rendered About-screen content. It depends
@@ -1954,8 +2639,15 @@ func (m Model) viewDetailsColumn(width, height int, sc *styleCache) string {
 	inner := sc.detailsInner
 
 	var sb strings.Builder
-	sb.WriteString(sc.columnTitleDetails.Render("Details"))
-	sb.WriteString("\n")
+	// Header row: tab strip when tabs are available for this item, else
+	// the simple "Details" title (drawings, configured designs, no item).
+	if m.tabsAvailable() {
+		sb.WriteString(renderTabStrip(m.detailsTab, m.availableTabs(), inner))
+		sb.WriteString("\n\n") // tabs use no MarginBottom; add blank row to match title spacing
+	} else {
+		sb.WriteString(sc.columnTitleDetails.Render("Details"))
+		sb.WriteString("\n")
+	}
 
 	// A document is "actionable" in Fusion when the details panel is
 	// populated for a non-container item. When true, we pin hint text for
@@ -1968,6 +2660,7 @@ func (m Model) viewDetailsColumn(width, height int, sc *styleCache) string {
 	}
 
 	// Total lines available inside the column body (after title + borders).
+	// Tab strip uses 2 lines (strip + blank) like the original title (title + MarginBottom).
 	bodyH := height - 3
 	if bodyH < 1 {
 		bodyH = 1
@@ -1979,14 +2672,15 @@ func (m Model) viewDetailsColumn(width, height int, sc *styleCache) string {
 	}
 
 	usedLines := 0
-	if m.detailsLoading {
+	switch {
+	case m.detailsLoading:
 		sb.WriteString(m.spinner.View())
 		sb.WriteString(styleLoading.Render(" Loading…"))
 		usedLines = 1
-	} else if m.details == nil {
+	case m.details == nil:
 		sb.WriteString(sc.itemDimDetails.Render("No item selected"))
 		usedLines = 1
-	} else {
+	case m.detailsTab == tabDetails || !m.tabsAvailable():
 		d := m.details
 		lines := m.detailLines(d, inner, sc)
 		scroll := clamp(m.detailsScroll, 0, max(0, len(lines)-visibleH))
@@ -2005,6 +2699,53 @@ func (m Model) viewDetailsColumn(width, height int, sc *styleCache) string {
 		}
 		if end < len(lines) {
 			sb.WriteString("\n" + styleItemDim.Render("  ↓ more"))
+			usedLines++
+		}
+	default:
+		// Uses / Where Used / Drawings tab content. tabContentLines
+		// already windows internally, so we just emit what it returns.
+		// "↑/↓ N more" indicators show whether scroll is possible above
+		// or below the current view.
+		rows := m.currentTabRowCount()
+		cursor := m.tabCursors[m.detailsTab]
+		scroll := m.tabScrolls[m.detailsTab]
+		hasUp := scroll > 0
+		hasDown := false
+		if rows > 0 {
+			// Best-effort check: if there are more rows past the
+			// current scroll than the window can fit (approx. 1 ref
+			// per 1.5 lines), there's content below.
+			approxRefsVisible := visibleH / 2
+			if approxRefsVisible < 1 {
+				approxRefsVisible = 1
+			}
+			hasDown = scroll+approxRefsVisible < rows
+		}
+		availH := visibleH
+		if hasUp {
+			availH--
+		}
+		if hasDown {
+			availH--
+		}
+		if availH < 1 {
+			availH = 1
+		}
+		lines := m.tabContentLines(inner, availH, sc)
+		if hasUp {
+			sb.WriteString(styleItemDim.Render("  ↑ more"))
+			sb.WriteString("\n")
+			usedLines++
+		}
+		for i, l := range lines {
+			sb.WriteString(l)
+			if i < len(lines)-1 {
+				sb.WriteString("\n")
+			}
+			usedLines++
+		}
+		if hasDown {
+			sb.WriteString("\n" + styleItemDim.Render(fmt.Sprintf("  ↓ %d more", rows-1-cursor)))
 			usedLines++
 		}
 	}
@@ -2026,10 +2767,174 @@ func (m Model) viewDetailsColumn(width, height int, sc *styleCache) string {
 		if m.details.Typename == "DesignItem" {
 			hint += "  [d] step"
 		}
+		if m.tabsAvailable() {
+			hint += "  [1-4] tabs"
+		}
 		sb.WriteString(sc.itemDimDetails.Render(hint))
 	}
 
 	return styleColumnInactive.Width(width).Height(height).Render(sb.String())
+}
+
+// renderTabStrip builds the header row showing only the tabs available
+// for the current item (DesignItem → 4 tabs, DrawingItem → 2 tabs).
+// Active tab is rendered in accent+bold, inactives in muted, separated
+// by " │ ". Switches to abbreviated labels when the inner width can't
+// fit the full label set.
+func renderTabStrip(active detailsTab, tabs []detailsTab, innerWidth int) string {
+	const fullSp = " │ "
+	// Compute the full-label width on the fly because it depends on
+	// which tabs are visible — DrawingItem's 2-tab strip is much
+	// narrower than DesignItem's 4-tab strip.
+	fullW := 0
+	for i, t := range tabs {
+		fullW += lipgloss.Width(t.label())
+		if i < len(tabs)-1 {
+			fullW += lipgloss.Width(fullSp)
+		}
+	}
+	useFull := innerWidth >= fullW
+	sep := styleTabSep.Render(fullSp)
+	var parts []string
+	for _, t := range tabs {
+		var lbl string
+		if useFull {
+			lbl = t.label()
+		} else {
+			lbl = t.labelShort()
+		}
+		if t == active {
+			parts = append(parts, styleTabActive.Render(lbl))
+		} else {
+			parts = append(parts, styleTabInactive.Render(lbl))
+		}
+	}
+	return strings.Join(parts, sep)
+}
+
+// tabContentLines renders the active non-Details tab's content list,
+// windowed to visibleH lines starting from m.tabScrolls. The active row
+// (m.tabCursors[tab]) is rendered with the selected-row style so the
+// keyboard cursor + mouse single-click highlight is visible.
+func (m Model) tabContentLines(width, visibleH int, sc *styleCache) []string {
+	if m.details == nil {
+		return []string{sc.itemDimDetails.Render("No item selected")}
+	}
+	cvid := m.details.RootComponentVersionID
+	tab := m.detailsTab
+
+	if m.tabLoading[tab] {
+		return []string{m.spinner.View() + styleLoading.Render(" Loading…")}
+	}
+	if e := m.tabErr[tab]; e != "" {
+		return []string{styleError.Render(truncate("Error: "+e, width))}
+	}
+
+	cursor := m.tabCursors[tab]
+	scroll := m.tabScrolls[tab]
+
+	switch tab {
+	case tabUses:
+		items, ok := m.usesCache[m.usesCacheKey()]
+		if !ok {
+			return []string{sc.itemDimDetails.Render("(not loaded)")}
+		}
+		if len(items) == 0 {
+			emptyMsg := "No sub-components"
+			if m.details.Typename == "DrawingItem" {
+				emptyMsg = "No source design"
+			}
+			return []string{sc.itemDimDetails.Render(emptyMsg)}
+		}
+		return componentRefLines(items, cursor, scroll, visibleH, width)
+	case tabWhereUsed:
+		items, ok := m.whereUsedCache[cvid]
+		if !ok {
+			return []string{sc.itemDimDetails.Render("(not loaded)")}
+		}
+		if len(items) == 0 {
+			return []string{sc.itemDimDetails.Render("Not referenced by any other design")}
+		}
+		return componentRefLines(items, cursor, scroll, visibleH, width)
+	case tabDrawings:
+		items, ok := m.drawingsCache[m.details.ID]
+		if !ok {
+			return []string{sc.itemDimDetails.Render("(not loaded)")}
+		}
+		if len(items) == 0 {
+			return []string{sc.itemDimDetails.Render("No drawings reference this design")}
+		}
+		return drawingRefLines(items, cursor, scroll, visibleH, width)
+	}
+	return nil
+}
+
+// componentRefLines renders a list of ComponentRef rows starting at
+// `scroll` and stopping once visibleH lines are filled. The row at
+// index `cursor` is rendered in selected style.
+func componentRefLines(refs []api.ComponentRef, cursor, scroll, visibleH, width int) []string {
+	var lines []string
+	if scroll < 0 {
+		scroll = 0
+	}
+	for i := scroll; i < len(refs) && len(lines) < visibleH; i++ {
+		r := refs[i]
+		head := r.Name
+		if head == "" {
+			head = r.DesignItemName
+		}
+		if r.PartNumber != "" && r.PartNumber != head {
+			head = head + "  " + styleDetailKey.Render(r.PartNumber)
+		}
+		primary := styleItemNormal
+		if i == cursor {
+			primary = styleItemSelected
+		}
+		lines = append(lines, primary.Render(truncate(head, width)))
+		if len(lines) >= visibleH {
+			break
+		}
+		if r.DesignItemName != "" && r.DesignItemName != r.Name {
+			lines = append(lines, styleItemDim.Render(truncate("  in "+r.DesignItemName, width)))
+		}
+	}
+	return lines
+}
+
+// drawingRefLines renders a windowed list of DrawingRef rows. Same
+// shape as componentRefLines: primary line = drawing name, secondary
+// (dim) line = modified-on / modified-by metadata.
+func drawingRefLines(refs []api.DrawingRef, cursor, scroll, visibleH, width int) []string {
+	var lines []string
+	if scroll < 0 {
+		scroll = 0
+	}
+	for i := scroll; i < len(refs) && len(lines) < visibleH; i++ {
+		r := refs[i]
+		primary := styleItemNormal
+		if i == cursor {
+			primary = styleItemSelected
+		}
+		lines = append(lines, primary.Render(truncate(r.Name, width)))
+		if len(lines) >= visibleH {
+			break
+		}
+		var sub string
+		if !r.ModifiedOn.IsZero() {
+			sub = "  " + r.ModifiedOn.Format("Jan 02 2006")
+		}
+		if r.ModifiedBy != "" {
+			if sub == "" {
+				sub = "  " + r.ModifiedBy
+			} else {
+				sub += "  " + r.ModifiedBy
+			}
+		}
+		if sub != "" {
+			lines = append(lines, styleItemDim.Render(truncate(sub, width)))
+		}
+	}
+	return lines
 }
 
 // detailLines returns pre-rendered lines for the details panel, memoised on

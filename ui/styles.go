@@ -101,6 +101,9 @@ var (
 	styleEmpty           lipgloss.Style
 	styleContainerItem   lipgloss.Style
 	styleDocumentItem    lipgloss.Style
+	styleTabActive       lipgloss.Style
+	styleTabInactive     lipgloss.Style
+	styleTabSep          lipgloss.Style
 )
 
 func applyTheme(t colorTheme) {
@@ -182,6 +185,16 @@ func applyTheme(t colorTheme) {
 	styleDocumentItem = lipgloss.NewStyle().
 		Foreground(t.documentFg).
 		Padding(0, 1)
+
+	styleTabActive = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(colorAccent)
+
+	styleTabInactive = lipgloss.NewStyle().
+		Foreground(colorMuted)
+
+	styleTabSep = lipgloss.NewStyle().
+		Foreground(colorSubtle)
 }
 
 func init() {

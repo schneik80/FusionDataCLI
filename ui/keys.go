@@ -19,6 +19,10 @@ type keyMap struct {
 	Debug       key.Binding
 	Mouse       key.Binding
 	Quit        key.Binding
+	// Details-pane tab switching
+	TabSelect key.Binding // 1/2/3/4 — direct jump to a tab
+	TabNext   key.Binding // Tab     — cycle forward
+	TabPrev   key.Binding // S-Tab   — cycle back
 }
 
 var keys = keyMap{
@@ -85,5 +89,17 @@ var keys = keyMap{
 	Quit: key.NewBinding(
 		key.WithKeys("q", "ctrl+c"),
 		key.WithHelp("q", "quit"),
+	),
+	TabSelect: key.NewBinding(
+		key.WithKeys("1", "2", "3", "4"),
+		key.WithHelp("1-4", "details tab"),
+	),
+	TabNext: key.NewBinding(
+		key.WithKeys("tab"),
+		key.WithHelp("tab", "next details tab"),
+	),
+	TabPrev: key.NewBinding(
+		key.WithKeys("shift+tab"),
+		key.WithHelp("shift+tab", "prev details tab"),
 	),
 }

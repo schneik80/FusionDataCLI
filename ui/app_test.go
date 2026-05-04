@@ -378,3 +378,338 @@ func TestBreadcrumb_HitDetection(t *testing.T) {
 		t.Errorf("hits[3].index = %d, want 1 (Inner folder)", hits[3].index)
 	}
 }
+
+// designModelWithTabs returns a stateBrowsing Model whose currently
+// selected item is a DesignItem with a populated RootComponentVersionID,
+// so the four-tab strip is available. Used by tab-dispatch tests.
+func designModelWithTabs() Model {
+	sp := spinner.New()
+	return Model{
+		state:         stateBrowsing,
+		width:         120,
+		height:        40,
+		spinner:       sp,
+		version:       "test",
+		token:         "tok",
+		activeCol:     colContents,
+		selectedHubID: "H1",
+		cols: [numCols][]api.NavItem{
+			{{ID: "P1", Name: "Project", Kind: "project", IsContainer: true}},
+			{{ID: "D1", Name: "Design.f3d", Kind: "design"}},
+		},
+		details: &api.ItemDetails{
+			ID:                     "D1",
+			Name:                   "Design.f3d",
+			Typename:               "DesignItem",
+			RootComponentVersionID: "CV1",
+		},
+		detailsCache:   map[string]*api.ItemDetails{},
+		usesCache:      map[string][]api.ComponentRef{},
+		whereUsedCache: map[string][]api.ComponentRef{},
+		drawingsCache:  map[string][]api.DrawingRef{},
+		styleCache:     &styleCache{},
+	}
+}
+
+// TestUpdate_TabSelect_DispatchesLoad verifies that pressing a number key
+// 1-4 switches the active tab and, for non-Details tabs, returns a fetch
+// command. Cache hits should produce a switch with no command.
+func TestUpdate_TabSelect_DispatchesLoad(t *testing.T) {
+	cases := []struct {
+		key  rune
+		want detailsTab
+	}{
+		{key: '2', want: tabUses},
+		{key: '3', want: tabWhereUsed},
+		{key: '4', want: tabDrawings},
+		{key: '1', want: tabDetails},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.key), func(t *testing.T) {
+			m := designModelWithTabs()
+			updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{tc.key}})
+			um := updated.(Model)
+			if um.detailsTab != tc.want {
+				t.Errorf("detailsTab = %d, want %d", um.detailsTab, tc.want)
+			}
+			if tc.want == tabDetails {
+				if cmd != nil {
+					t.Errorf("Details tab should not emit a command, got %T", cmd)
+				}
+				return
+			}
+			if !um.tabLoading[tc.want] {
+				t.Errorf("tabLoading[%d] = false, want true (fetch in flight)", tc.want)
+			}
+			if cmd == nil {
+				t.Errorf("expected non-nil load cmd for tab %d", tc.want)
+			}
+		})
+	}
+}
+
+// TestUpdate_TabSelect_NoTabsAvailableIsNoop confirms tabs are inert
+// for items that have no tab strip at all (BasicItem,
+// ConfiguredDesignItem, etc.): pressing 1-4 changes nothing and emits
+// no cmd. Drawings used to live here too, but they now have a Uses
+// tab — see TestUpdate_TabSelect_DrawingItemUsesAvailable.
+func TestUpdate_TabSelect_NoTabsAvailableIsNoop(t *testing.T) {
+	m := designModelWithTabs()
+	m.details.Typename = "BasicItem"
+	m.details.RootComponentVersionID = ""
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	um := updated.(Model)
+	if um.detailsTab != tabDetails {
+		t.Errorf("detailsTab = %d, want tabDetails for item type with no tabs", um.detailsTab)
+	}
+	if cmd != nil {
+		t.Errorf("expected nil cmd, got %T", cmd)
+	}
+}
+
+// TestUpdate_TabSelect_DrawingItemUsesAvailable confirms drawings
+// expose Uses (the source design) but not Where Used or Drawings.
+// Pressing 2 selects Uses and triggers a fetch; pressing 3 or 4 is a
+// no-op because those tabs don't apply to drawings.
+func TestUpdate_TabSelect_DrawingItemUsesAvailable(t *testing.T) {
+	m := designModelWithTabs()
+	m.details.Typename = "DrawingItem"
+	m.details.RootComponentVersionID = ""
+	m.details.ID = "di-drawing-1"
+
+	// 2 → Uses (works on drawings)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	um := updated.(Model)
+	if um.detailsTab != tabUses {
+		t.Errorf("after '2': detailsTab = %d, want tabUses", um.detailsTab)
+	}
+	if cmd == nil {
+		t.Error("after '2': expected non-nil load cmd, got nil")
+	}
+
+	// 3 (Where Used) and 4 (Drawings) shouldn't apply — current tab stays put.
+	for _, key := range []rune{'3', '4'} {
+		updated, cmd = um.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{key}})
+		nm := updated.(Model)
+		if nm.detailsTab != tabUses {
+			t.Errorf("after '%c': detailsTab changed from tabUses to %d", key, nm.detailsTab)
+		}
+		if cmd != nil {
+			t.Errorf("after '%c': expected nil cmd, got %T", key, cmd)
+		}
+	}
+}
+
+// TestUpdate_TabNext_Cycles asserts that Tab cycles forward through all
+// four tabs and Shift-Tab cycles back, wrapping at the ends.
+func TestUpdate_TabNext_Cycles(t *testing.T) {
+	m := designModelWithTabs()
+	// Forward: tabDetails -> tabUses -> tabWhereUsed -> tabDrawings -> tabDetails.
+	want := []detailsTab{tabUses, tabWhereUsed, tabDrawings, tabDetails}
+	for i, w := range want {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m = updated.(Model)
+		if m.detailsTab != w {
+			t.Errorf("after %d Tab presses: detailsTab = %d, want %d", i+1, m.detailsTab, w)
+		}
+	}
+	// Backward from tabDetails wraps to tabDrawings.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = updated.(Model)
+	if m.detailsTab != tabDrawings {
+		t.Errorf("after Shift+Tab from tabDetails: detailsTab = %d, want tabDrawings", m.detailsTab)
+	}
+}
+
+// TestResetTabState_TerminatesAndZeroesAllFields catches a regression
+// where a refactor accidentally called resetTabState() from inside
+// itself (caught a real stack-overflow crash on hub-select). The test
+// pre-populates every per-tab field, calls resetTabState, and asserts
+// the call returns and all fields are zero. If anyone reintroduces
+// recursion the goroutine stack overflows and the test fails.
+func TestResetTabState_TerminatesAndZeroesAllFields(t *testing.T) {
+	m := &Model{}
+	m.tabLoading[tabUses] = true
+	m.tabErr[tabWhereUsed] = "boom"
+	m.tabCursors[tabDrawings] = 7
+	m.tabScrolls[tabUses] = 3
+
+	m.resetTabState()
+
+	if m.tabLoading[tabUses] || m.tabErr[tabWhereUsed] != "" ||
+		m.tabCursors[tabDrawings] != 0 || m.tabScrolls[tabUses] != 0 {
+		t.Errorf("resetTabState left state populated: %+v", m)
+	}
+}
+
+// TestUpdate_TabCursorMoves_OnNonDetailsTab confirms ↑/↓ moves the
+// per-tab cursor (not the Contents column cursor) when a non-Details
+// tab is active and rows are loaded.
+func TestUpdate_TabCursorMoves_OnNonDetailsTab(t *testing.T) {
+	m := designModelWithTabs()
+	m.detailsTab = tabUses
+	m.usesCache["CV1"] = []api.ComponentRef{
+		{Name: "BoltA", DesignItemID: "di-bolt-a"},
+		{Name: "BoltB", DesignItemID: "di-bolt-b"},
+		{Name: "BoltC", DesignItemID: "di-bolt-c"},
+	}
+
+	// Initial cursor is 0; ↓ moves to 1, ↓ again to 2.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.tabCursors[tabUses] != 1 {
+		t.Errorf("after ↓: tabCursors[tabUses] = %d, want 1", m.tabCursors[tabUses])
+	}
+	// Contents cursor must NOT move.
+	if m.cursors[colContents] != 0 {
+		t.Errorf("Contents cursor should stay put on non-Details tab: %d", m.cursors[colContents])
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.tabCursors[tabUses] != 2 {
+		t.Errorf("after second ↓: tabCursors[tabUses] = %d, want 2", m.tabCursors[tabUses])
+	}
+
+	// Past last row: clamp at len-1.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.tabCursors[tabUses] != 2 {
+		t.Errorf("clamped: tabCursors[tabUses] = %d, want 2", m.tabCursors[tabUses])
+	}
+
+	// ↑ moves back.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if m.tabCursors[tabUses] != 1 {
+		t.Errorf("after ↑: tabCursors[tabUses] = %d, want 1", m.tabCursors[tabUses])
+	}
+}
+
+// TestUpdate_EnterOnTabRow_DispatchesLocate confirms Enter on a non-Details
+// tab fires the locate command for the highlighted row's DesignItemID.
+func TestUpdate_EnterOnTabRow_DispatchesLocate(t *testing.T) {
+	m := designModelWithTabs()
+	m.detailsTab = tabWhereUsed
+	m.whereUsedCache["CV1"] = []api.ComponentRef{
+		{Name: "Robot", DesignItemID: "di-robot", DesignItemName: "Robot.f3d"},
+		{Name: "Arm", DesignItemID: "di-arm", DesignItemName: "Arm.f3d"},
+	}
+	m.tabCursors[tabWhereUsed] = 1 // pretend the user moved cursor to row 1
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected non-nil locate cmd, got nil")
+	}
+	// Status message should reflect the in-flight locate.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	um := updated.(Model)
+	if !strings.Contains(um.statusMsg, "Locating") {
+		t.Errorf("statusMsg = %q, want 'Locating ...'", um.statusMsg)
+	}
+}
+
+// TestHandleItemLocation_CrossHub surfaces a friendly status when the
+// located item is in a different hub than the current selection.
+func TestHandleItemLocation_CrossHub(t *testing.T) {
+	m := designModelWithTabs()
+	m.selectedHubID = "H1"
+	loc := &api.ItemLocation{
+		HubID:       "H2",
+		ProjectID:   "P-other",
+		ProjectName: "ConfidentialProj",
+	}
+	updated, cmd := m.handleItemLocation(itemLocationLoadedMsg{loc: loc, target: "I1"})
+	if cmd != nil {
+		t.Errorf("cross-hub locate should not emit a command, got %T", cmd)
+	}
+	if !strings.Contains(updated.statusMsg, "another hub") {
+		t.Errorf("statusMsg = %q, want substring 'another hub'", updated.statusMsg)
+	}
+}
+
+// TestHandleItemLocation_ProjectNotVisible surfaces a friendly status
+// when the located project isn't in the current hub's project list.
+func TestHandleItemLocation_ProjectNotVisible(t *testing.T) {
+	m := designModelWithTabs()
+	loc := &api.ItemLocation{
+		HubID:       "H1", // same as selectedHubID in designModelWithTabs
+		ProjectID:   "P-stranger",
+		ProjectName: "Restricted",
+	}
+	updated, cmd := m.handleItemLocation(itemLocationLoadedMsg{loc: loc, target: "I1"})
+	if cmd != nil {
+		t.Errorf("missing-project locate should not emit a command, got %T", cmd)
+	}
+	if !strings.Contains(updated.statusMsg, "not visible") {
+		t.Errorf("statusMsg = %q, want substring 'not visible'", updated.statusMsg)
+	}
+}
+
+// TestHandleItemLocation_DrillsFolders confirms the happy path:
+// project is visible, folder chain is queued via pendingNav, and the
+// resulting tea.Cmd loads project contents to start the drill.
+func TestHandleItemLocation_DrillsFolders(t *testing.T) {
+	m := designModelWithTabs()
+	m.cols[colProjects] = []api.NavItem{
+		{ID: "P-other", Name: "Other"},
+		{ID: "P1", Name: "Match", Kind: "project", IsContainer: true},
+	}
+	loc := &api.ItemLocation{
+		HubID:        "H1",
+		ProjectID:    "P1",
+		ProjectName:  "Match",
+		ProjectAltID: "a.match",
+		FolderPath: []api.FolderRef{
+			{ID: "F-root", Name: "Top"},
+			{ID: "F-leaf", Name: "Sub"},
+		},
+	}
+	updated, cmd := m.handleItemLocation(itemLocationLoadedMsg{loc: loc, target: "di-target"})
+	if cmd == nil {
+		t.Fatal("expected loadProjectContentsCmd, got nil")
+	}
+	if updated.cursors[colProjects] != 1 {
+		t.Errorf("project cursor = %d, want 1 (P1)", updated.cursors[colProjects])
+	}
+	if updated.activeCol != colContents {
+		t.Errorf("activeCol = %d, want colContents", updated.activeCol)
+	}
+	if updated.pendingNav == nil {
+		t.Fatal("pendingNav not set")
+	}
+	if updated.pendingNav.targetItemID != "di-target" {
+		t.Errorf("pendingNav.targetItemID = %q, want 'di-target'", updated.pendingNav.targetItemID)
+	}
+	if len(updated.pendingNav.folders) != 2 {
+		t.Errorf("pendingNav.folders len = %d, want 2", len(updated.pendingNav.folders))
+	}
+}
+
+// TestUpdate_UsesLoadedMsg_PopulatesCacheAndClearsLoading drives a
+// successful usesLoadedMsg through the model after a tabUses fetch was
+// in flight, asserting the cache is populated and tabLoading[tabUses]
+// is cleared so the renderer drops the spinner.
+func TestUpdate_UsesLoadedMsg_PopulatesCacheAndClearsLoading(t *testing.T) {
+	m := designModelWithTabs()
+	m.detailsTab = tabUses
+	m.tabLoading[tabUses] = true
+
+	items := []api.ComponentRef{{Name: "BoltA", PartNumber: "PN-1"}}
+	updated, cmd := m.Update(usesLoadedMsg{cvid: "CV1", items: items, err: nil})
+	um := updated.(Model)
+	if cmd != nil {
+		t.Errorf("expected nil cmd after data arrives, got %T", cmd)
+	}
+	if um.tabLoading[tabUses] {
+		t.Errorf("tabLoading[tabUses] still true after data arrived")
+	}
+	got, ok := um.usesCache["CV1"]
+	if !ok {
+		t.Fatal("usesCache missing entry for CV1")
+	}
+	if len(got) != 1 || got[0].PartNumber != "PN-1" {
+		t.Errorf("cached items = %+v, want one BoltA / PN-1", got)
+	}
+}

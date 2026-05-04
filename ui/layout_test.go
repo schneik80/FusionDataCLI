@@ -67,8 +67,63 @@ func sampleBrowsingModel(width, height int) Model {
 			{{ID: "P1", Name: "4WD Buggy", Kind: "project", IsContainer: true}},
 			{{ID: "D1", Name: "MyDesign", Kind: "design"}},
 		},
-		details:      &api.ItemDetails{Name: "MyDesign", Size: "12345"},
-		detailsCache: make(map[string]*api.ItemDetails),
-		styleCache:   &styleCache{},
+		details:        &api.ItemDetails{Name: "MyDesign", Size: "12345"},
+		detailsCache:   make(map[string]*api.ItemDetails),
+		usesCache:      make(map[string][]api.ComponentRef),
+		whereUsedCache: make(map[string][]api.ComponentRef),
+		drawingsCache:  make(map[string][]api.DrawingRef),
+		styleCache:     &styleCache{},
+	}
+}
+
+// TestView_AfterHubSelect_NoCrash reproduces the model state right after
+// the user has picked a hub from the overlay: state=stateBrowsing, the
+// projects column is in its loading state, no item is selected, no
+// content yet. View() must render successfully — this guards against
+// any nil-deref or out-of-range access from the recent tab + locate
+// changes touching the post-hub-select rendering path.
+func TestView_AfterHubSelect_NoCrash(t *testing.T) {
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	for _, size := range []struct{ w, h int }{
+		{w: 80, h: 24},
+		{w: 120, h: 40},
+		{w: 200, h: 50},
+		{w: 60, h: 20}, // narrow
+	} {
+		t.Run(fmt.Sprintf("%dx%d", size.w, size.h), func(t *testing.T) {
+			m := Model{
+				state:         stateBrowsing,
+				width:         size.w,
+				height:        size.h,
+				spinner:       sp,
+				version:       "test",
+				activeCol:     colProjects,
+				selectedHubID: "H1",
+				selectedHubNameCache: "Hub",
+				loading: [numCols]bool{true, false},
+				cols: [numCols][]api.NavItem{
+					nil, // projects loading
+					nil, // contents not loaded yet
+				},
+				detailsCache:   make(map[string]*api.ItemDetails),
+				usesCache:      make(map[string][]api.ComponentRef),
+				whereUsedCache: make(map[string][]api.ComponentRef),
+				drawingsCache:  make(map[string][]api.DrawingRef),
+				styleCache:     &styleCache{},
+			}
+			// Call View — this exercises viewBrowser, renderColumn (for
+			// both projects and contents), viewDetailsColumn, and the
+			// breadcrumb. Any panic here would also panic the real app.
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("View() panicked: %v", r)
+				}
+			}()
+			out := m.View()
+			if out == "" {
+				t.Errorf("View() returned empty string")
+			}
+		})
 	}
 }
