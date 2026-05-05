@@ -23,6 +23,10 @@ type keyMap struct {
 	TabSelect key.Binding // 1/2/3/4 — direct jump to a tab
 	TabNext   key.Binding // Tab     — cycle forward
 	TabPrev   key.Binding // S-Tab   — cycle back
+	// Pins
+	PinToggle key.Binding // P             — pin/unpin current item
+	PinsOpen  key.Binding // p             — open pins overlay
+	PinDelete key.Binding // delete/bksp   — remove selected pin (overlay only)
 }
 
 var keys = keyMap{
@@ -101,5 +105,17 @@ var keys = keyMap{
 	TabPrev: key.NewBinding(
 		key.WithKeys("shift+tab"),
 		key.WithHelp("shift+tab", "prev details tab"),
+	),
+	PinToggle: key.NewBinding(
+		key.WithKeys("P"),
+		key.WithHelp("P", "pin/unpin item"),
+	),
+	PinsOpen: key.NewBinding(
+		key.WithKeys("p"),
+		key.WithHelp("p", "open pins"),
+	),
+	PinDelete: key.NewBinding(
+		key.WithKeys("delete", "backspace"),
+		key.WithHelp("del", "remove pin"),
 	),
 }

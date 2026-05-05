@@ -17,6 +17,7 @@ import (
 	"github.com/schneik80/FusionDataCLI/auth"
 	"github.com/schneik80/FusionDataCLI/config"
 	"github.com/schneik80/FusionDataCLI/fusion"
+	"github.com/schneik80/FusionDataCLI/pins"
 )
 
 // ---------------------------------------------------------------------------
@@ -34,6 +35,7 @@ const (
 	stateHubSelect                   // hub selection overlay
 	stateAbout                       // about / license overlay
 	stateDebug                       // debug log overlay
+	statePins                        // pins overlay
 	stateError                       // unrecoverable error
 )
 
@@ -258,6 +260,11 @@ type Model struct {
 	aboutScroll int
 	debugScroll int
 
+	// Pins overlay
+	pins       []pins.Pin
+	pinsCursor int
+	pinsScroll int
+
 	// For column 2: when drilling into a subfolder, track the stack so we can go back.
 	folderStack []breadcrumbEntry
 
@@ -303,6 +310,7 @@ type styleCache struct {
 	itemNormalNav      lipgloss.Style
 	containerItemNav   lipgloss.Style
 	documentItemNav    lipgloss.Style
+	pinnedItemNav      lipgloss.Style
 	emptyNav           lipgloss.Style
 	itemDimDetails     lipgloss.Style
 
@@ -331,6 +339,7 @@ func (sc *styleCache) rebuild(navInner, detailsInner int) {
 	sc.itemNormalNav = styleItemNormal.Width(navInner)
 	sc.containerItemNav = styleContainerItem.Width(navInner)
 	sc.documentItemNav = styleDocumentItem.Width(navInner)
+	sc.pinnedItemNav = stylePinnedItem.Width(navInner)
 	sc.emptyNav = styleEmpty.Width(navInner)
 	sc.itemDimDetails = styleItemDim.Width(detailsInner)
 	sc.detailLines = nil
@@ -365,6 +374,8 @@ func New(cfg *config.Config, cfgErr error, version string) Model {
 	sp.Spinner = spinner.Dot
 	sp.Style = styleLoading
 
+	loadedPins, _ := pins.Load()
+
 	if cfgErr != nil {
 		return Model{
 			state:          stateSetupNeeded,
@@ -372,6 +383,7 @@ func New(cfg *config.Config, cfgErr error, version string) Model {
 			spinner:        sp,
 			version:        version,
 			mouseEnabled:   true,
+			pins:           loadedPins,
 			detailsCache:   make(map[string]*api.ItemDetails),
 			usesCache:      make(map[string][]api.ComponentRef),
 			whereUsedCache: make(map[string][]api.ComponentRef),
@@ -381,12 +393,13 @@ func New(cfg *config.Config, cfgErr error, version string) Model {
 	}
 
 	return Model{
-		state:        stateLoading,
-		clientID:     cfg.ClientID,
-		clientSecret: cfg.ClientSecret,
-		spinner:      sp,
-		version:      version,
-		mouseEnabled: true,
+		state:          stateLoading,
+		clientID:       cfg.ClientID,
+		clientSecret:   cfg.ClientSecret,
+		spinner:        sp,
+		version:        version,
+		mouseEnabled:   true,
+		pins:           loadedPins,
 		detailsCache:   make(map[string]*api.ItemDetails),
 		usesCache:      make(map[string][]api.ComponentRef),
 		whereUsedCache: make(map[string][]api.ComponentRef),
@@ -1052,6 +1065,41 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.debugScroll++
 		return m, nil
 
+	case key.Matches(msg, keys.PinsOpen):
+		if m.state == statePins {
+			m.state = stateBrowsing
+		} else if m.state == stateBrowsing {
+			m.pinsCursor = 0
+			m.pinsScroll = 0
+			m.state = statePins
+		}
+		return m, nil
+
+	case m.state == statePins && key.Matches(msg, keys.Up):
+		if m.pinsCursor > 0 {
+			m.pinsCursor--
+			m.adjustPinsScroll()
+		}
+		return m, nil
+
+	case m.state == statePins && key.Matches(msg, keys.Down):
+		if m.pinsCursor < len(m.pins)-1 {
+			m.pinsCursor++
+			m.adjustPinsScroll()
+		}
+		return m, nil
+
+	case m.state == statePins && key.Matches(msg, keys.Enter):
+		return m.navigateToPinnedItem()
+
+	case m.state == statePins && key.Matches(msg, keys.PinDelete):
+		return m.removePinnedItem()
+
+	case m.state == statePins:
+		// any other key closes the pins overlay
+		m.state = stateBrowsing
+		return m, nil
+
 	case m.state == stateAuthNeeded && key.Matches(msg, keys.Enter):
 		m.state = stateAuthWaiting
 		return m, tea.Batch(m.spinner.Tick, loginCmd(m.clientID, m.clientSecret))
@@ -1109,6 +1157,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Download):
 		return m.downloadStep()
+
+	case key.Matches(msg, keys.PinToggle):
+		return m.togglePin()
 
 	case key.Matches(msg, keys.Refresh):
 		return m.refresh()
@@ -2056,6 +2107,156 @@ func (m *Model) adjustHubScroll() {
 	}
 }
 
+func (m *Model) adjustPinsScroll() {
+	visible := m.visibleRows()
+	if m.pinsCursor < m.pinsScroll {
+		m.pinsScroll = m.pinsCursor
+	} else if m.pinsCursor >= m.pinsScroll+visible {
+		m.pinsScroll = m.pinsCursor - visible + 1
+	}
+}
+
+func (m Model) togglePin() (Model, tea.Cmd) {
+	col := m.cols[m.activeCol]
+	if len(col) == 0 {
+		return m, nil
+	}
+	item := col[m.cursors[m.activeCol]]
+	if !pins.IsPinnable(item.Kind) {
+		m.statusMsg = "Cannot pin hubs"
+		return m, nil
+	}
+	if pins.IsPinned(m.pins, item.ID) {
+		m.pins = pins.Remove(m.pins, item.ID)
+		m.statusMsg = "Unpinned: " + item.Name
+	} else {
+		pin := pins.Pin{
+			ID:    item.ID,
+			Name:  item.Name,
+			Kind:  item.Kind,
+			HubID: m.selectedHubID,
+		}
+		// Capture project context for project/folder/document navigation
+		// so we can navigate without an API call later.
+		if proj := m.selectedItem(colProjects); proj != nil {
+			pin.ProjectID = proj.ID
+			pin.ProjectAltID = proj.AltID
+		}
+		// Capture ancestor folder chain. For folders, include the folder
+		// itself so pendingNav can drill all the way into it.
+		for _, entry := range m.folderStack {
+			pin.FolderPath = append(pin.FolderPath, pins.FolderRef{ID: entry.id, Name: entry.name})
+		}
+		if item.Kind == "folder" {
+			pin.FolderPath = append(pin.FolderPath, pins.FolderRef{ID: item.ID, Name: item.Name})
+		}
+		m.pins = pins.Add(m.pins, pin)
+		m.statusMsg = "Pinned: " + item.Name
+	}
+	if err := pins.Save(m.pins); err != nil {
+		m.statusMsg = "Pin save failed: " + err.Error()
+	}
+	return m, nil
+}
+
+func (m Model) removePinnedItem() (Model, tea.Cmd) {
+	if len(m.pins) == 0 {
+		return m, nil
+	}
+	m.pins = pins.Remove(m.pins, m.pins[m.pinsCursor].ID)
+	if m.pinsCursor >= len(m.pins) && m.pinsCursor > 0 {
+		m.pinsCursor--
+	}
+	m.adjustPinsScroll()
+	_ = pins.Save(m.pins)
+	return m, nil
+}
+
+func (m Model) navigateToPinnedItem() (Model, tea.Cmd) {
+	if len(m.pins) == 0 {
+		return m, nil
+	}
+	p := m.pins[m.pinsCursor]
+	m.state = stateBrowsing
+	// Wrong hub: surface a friendly message and stay put.
+	if p.HubID != "" && m.selectedHubID != "" && p.HubID != m.selectedHubID {
+		m.statusMsg = "Pin is in another hub: " + p.Name
+		return m, nil
+	}
+	switch p.Kind {
+	case "project":
+		return m.navigateToPinnedProject(p)
+	case "folder":
+		return m.navigateToPinnedFolder(p)
+	default:
+		// Documents (design, drawing, configured): use the API locate flow.
+		m.statusMsg = "Locating " + p.Name + "…"
+		return m, locateItemCmd(m.token, p.HubID, p.ID)
+	}
+}
+
+// navigateToPinnedProject selects a pinned project in the Projects column
+// and loads its root contents — no API locate call needed.
+func (m Model) navigateToPinnedProject(p pins.Pin) (Model, tea.Cmd) {
+	for i, proj := range m.cols[colProjects] {
+		if proj.ID == p.ProjectID {
+			m.cursors[colProjects] = i
+			m.adjustScroll(colProjects)
+			m.selectedProjectAltID = proj.AltID
+			m.activeCol = colContents
+			m.folderStack = nil
+			m.cols[colContents] = nil
+			m.loading[colContents] = true
+			m.details = nil
+			m.detailsScroll = 0
+			m.detailsTab = tabDetails
+			return m, loadProjectContentsCmd(m.token, proj.ID)
+		}
+	}
+	m.statusMsg = "Project not in current hub: " + p.Name
+	return m, nil
+}
+
+// navigateToPinnedFolder uses the folder path stored at pin time to drive
+// pendingNav — no API locate call needed.
+func (m Model) navigateToPinnedFolder(p pins.Pin) (Model, tea.Cmd) {
+	if p.ProjectID == "" || len(p.FolderPath) == 0 {
+		m.statusMsg = "No location stored for: " + p.Name
+		return m, nil
+	}
+	projIdx := -1
+	for i, proj := range m.cols[colProjects] {
+		if proj.ID == p.ProjectID {
+			projIdx = i
+			break
+		}
+	}
+	if projIdx < 0 {
+		m.statusMsg = "Project not in current hub: " + p.Name
+		return m, nil
+	}
+	proj := m.cols[colProjects][projIdx]
+	m.cursors[colProjects] = projIdx
+	m.adjustScroll(colProjects)
+	m.selectedProjectAltID = proj.AltID
+	m.activeCol = colContents
+	m.cols[colContents] = nil
+	m.loading[colContents] = true
+	m.folderStack = nil
+	m.details = nil
+	m.detailsScroll = 0
+	m.detailsTab = tabDetails
+	// Convert stored folder refs to api.FolderRef for pendingNav.
+	// FolderPath for a folder pin includes the folder itself as the last
+	// hop, so pendingNav drills all the way into it.
+	folderRefs := make([]api.FolderRef, len(p.FolderPath))
+	for i, f := range p.FolderPath {
+		folderRefs[i] = api.FolderRef{ID: f.ID, Name: f.Name}
+	}
+	m.pendingNav = &pendingNavState{folders: folderRefs}
+	return m, loadProjectContentsCmd(m.token, proj.ID)
+}
+
 // selectedItem returns a pointer to the item at the cursor in a given column, or nil.
 func (m *Model) selectedItem(col int) *api.NavItem {
 	items := m.cols[col]
@@ -2090,6 +2291,8 @@ func (m Model) View() string {
 		return m.viewAbout()
 	case stateDebug:
 		return m.viewDebug()
+	case statePins:
+		return m.viewPins()
 	case stateError:
 		return m.viewError()
 	}
@@ -2170,6 +2373,67 @@ func (m Model) viewHubSelect() string {
 		sb.WriteString("\n" + styleItemDim.Render("  ↑ more"))
 	}
 	if end < len(m.hubs) {
+		sb.WriteString("\n" + styleItemDim.Render("  ↓ more"))
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, sb.String())
+}
+
+func (m Model) viewPins() string {
+	header := styleHeader.Render("FusionDataCLI — Pins") +
+		styleStatus.Render("  [↑↓/jk] move  [Enter] go to item  [del] remove  [p] close")
+
+	if len(m.pins) == 0 {
+		body := "\n" + styleItemDim.Render("  No pins yet.") + "\n" +
+			styleItemDim.Render("  Press [Shift+P] while browsing to pin a project, folder, or document.")
+		return lipgloss.JoinVertical(lipgloss.Left, header, body)
+	}
+
+	visibleH := m.height - 5
+	if visibleH < 1 {
+		visibleH = 1
+	}
+	scroll := clamp(m.pinsScroll, 0, max(0, len(m.pins)-visibleH))
+	end := min(scroll+visibleH, len(m.pins))
+	innerWidth := m.width - 8
+	if innerWidth < 20 {
+		innerWidth = 20
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n")
+
+	lastKind := ""
+	for i := scroll; i < end; i++ {
+		p := m.pins[i]
+		if p.Kind != lastKind {
+			if lastKind != "" {
+				sb.WriteString("\n")
+			}
+			heading := strings.ToUpper(p.Kind[:1]) + p.Kind[1:] + "s"
+			sb.WriteString(styleItemDim.Render("  — " + heading + " —"))
+			sb.WriteString("\n")
+			lastKind = p.Kind
+		}
+		icon := kindIcon(p.Kind)
+		name := p.Name
+		if p.Kind == "folder" {
+			name += "/"
+		}
+		label := truncate(icon+name, innerWidth-2)
+		if i == m.pinsCursor {
+			sb.WriteString(styleItemSelected.Width(innerWidth).Render(label))
+		} else {
+			sb.WriteString(stylePinnedItem.Width(innerWidth).Render(label))
+		}
+		if i < end-1 {
+			sb.WriteString("\n")
+		}
+	}
+	if scroll > 0 {
+		sb.WriteString("\n" + styleItemDim.Render("  ↑ more"))
+	}
+	if end < len(m.pins) {
 		sb.WriteString("\n" + styleItemDim.Render("  ↓ more"))
 	}
 
@@ -2530,7 +2794,7 @@ func (m Model) viewBrowser() string {
 	if !m.mouseEnabled {
 		mouseLabel = "[m] mouse:off"
 	}
-	helpText := "[↑↓/jk] move  [←→/l] nav  [h] hubs  [r] refresh  [t] theme  " + mouseLabel + "  [a] about  [q] quit"
+	helpText := "[↑↓/jk] move  [←→/l] nav  [h] hubs  [P] pin  [p] pins  [r] refresh  [t] theme  " + mouseLabel + "  [a] about  [q] quit"
 	// contentWidth is the writable area inside styleFooter's border+padding:
 	// border(none left/right) + padding(0,1) = 2 columns reserved. The border
 	// is drawn only on the top, so only horizontal padding consumes columns.
@@ -2601,7 +2865,15 @@ func (m Model) renderColumn(col int, title string, width, height int, sc *styleC
 				case selected:
 					line = sc.itemSelectedAccent.Render(label)
 				default:
-					if item.IsContainer {
+					if pins.IsPinned(m.pins, item.ID) {
+						icon := kindIcon(item.Kind)
+						name := item.Name
+						if item.Kind == "folder" {
+							name += "/"
+						}
+						pinnedLabel := "★ " + truncate(icon+name, innerWidth-4)
+						line = sc.pinnedItemNav.Render(pinnedLabel)
+					} else if item.IsContainer {
 						line = sc.containerItemNav.Render(label)
 					} else {
 						line = sc.documentItemNav.Render(label)

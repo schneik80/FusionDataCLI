@@ -17,6 +17,7 @@ type colorTheme struct {
 	loading     lipgloss.Color // color for loading spinners and empty state text
 	containerFg lipgloss.Color // hubs, projects, folders
 	documentFg  lipgloss.Color // designs, drawings
+	pinnedFg    lipgloss.Color // pinned items — gold/starred accent
 }
 
 var themes = []colorTheme{
@@ -32,6 +33,7 @@ var themes = []colorTheme{
 		loading:     lipgloss.Color("#888888"),
 		containerFg: lipgloss.Color("#89B4D4"), // steel blue — complement to rust orange
 		documentFg:  lipgloss.Color("#FFFFFF"), // white
+		pinnedFg:    lipgloss.Color("#D4AC0D"), // warm gold
 	},
 	{
 		// Mono — greyscale only
@@ -45,6 +47,7 @@ var themes = []colorTheme{
 		loading:     lipgloss.Color("#777777"),
 		containerFg: lipgloss.Color("#EEEEEE"), // bright grey — structural elements
 		documentFg:  lipgloss.Color("#AAAAAA"), // mid grey    — data items recede
+		pinnedFg:    lipgloss.Color("#E8D44D"), // bright yellow — only non-grey, immediately distinct
 	},
 	{
 		// System — ANSI color tokens; inherits the terminal's own color scheme
@@ -58,6 +61,7 @@ var themes = []colorTheme{
 		loading:     lipgloss.Color("3"),  // ANSI yellow       — loading / empty state
 		containerFg: lipgloss.Color("2"),  // ANSI green        — directories in ls
 		documentFg:  lipgloss.Color("7"),  // ANSI white        — regular files
+		pinnedFg:    lipgloss.Color("3"),  // ANSI yellow       — starred/important
 	},
 }
 
@@ -101,6 +105,7 @@ var (
 	styleEmpty           lipgloss.Style
 	styleContainerItem   lipgloss.Style
 	styleDocumentItem    lipgloss.Style
+	stylePinnedItem      lipgloss.Style
 	styleTabActive       lipgloss.Style
 	styleTabInactive     lipgloss.Style
 	styleTabSep          lipgloss.Style
@@ -184,6 +189,10 @@ func applyTheme(t colorTheme) {
 
 	styleDocumentItem = lipgloss.NewStyle().
 		Foreground(t.documentFg).
+		Padding(0, 1)
+
+	stylePinnedItem = lipgloss.NewStyle().
+		Foreground(t.pinnedFg).
 		Padding(0, 1)
 
 	styleTabActive = lipgloss.NewStyle().
