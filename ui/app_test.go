@@ -501,26 +501,6 @@ func TestUpdate_TabSelect_DrawingItemUsesAvailable(t *testing.T) {
 	}
 }
 
-// TestUpdate_TabNext_Cycles asserts that Tab cycles forward through all
-// four tabs and Shift-Tab cycles back, wrapping at the ends.
-func TestUpdate_TabNext_Cycles(t *testing.T) {
-	m := designModelWithTabs()
-	// Forward: tabDetails -> tabUses -> tabWhereUsed -> tabDrawings -> tabDetails.
-	want := []detailsTab{tabUses, tabWhereUsed, tabDrawings, tabDetails}
-	for i, w := range want {
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-		m = updated.(Model)
-		if m.detailsTab != w {
-			t.Errorf("after %d Tab presses: detailsTab = %d, want %d", i+1, m.detailsTab, w)
-		}
-	}
-	// Backward from tabDetails wraps to tabDrawings.
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
-	m = updated.(Model)
-	if m.detailsTab != tabDrawings {
-		t.Errorf("after Shift+Tab from tabDetails: detailsTab = %d, want tabDrawings", m.detailsTab)
-	}
-}
 
 // TestResetTabState_TerminatesAndZeroesAllFields catches a regression
 // where a refactor accidentally called resetTabState() from inside

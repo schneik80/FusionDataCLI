@@ -1192,11 +1192,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case key.Matches(msg, keys.TabNext):
-		return m.selectTab(m.cycleTab(1))
-
-	case key.Matches(msg, keys.TabPrev):
-		return m.selectTab(m.cycleTab(-1))
 	}
 
 	return m, nil
@@ -2794,7 +2789,7 @@ func (m Model) viewBrowser() string {
 	if !m.mouseEnabled {
 		mouseLabel = "[m] mouse:off"
 	}
-	helpText := "[↑↓/jk] move  [←→/l] nav  [h] hubs  [P] pin  [p] pins  [r] refresh  [t] theme  " + mouseLabel + "  [a] about  [q] quit"
+	helpText := "[↑↓/ws] move  [←→/ad] nav  [h] hubs  [shift+p] pin  [p] pins  [r] refresh  [t] theme  " + mouseLabel + "  [shift+a] about  [q] quit"
 	// contentWidth is the writable area inside styleFooter's border+padding:
 	// border(none left/right) + padding(0,1) = 2 columns reserved. The border
 	// is drawn only on the top, so only horizontal padding consumes columns.
@@ -3032,15 +3027,21 @@ func (m Model) viewDetailsColumn(width, height int, sc *styleCache) string {
 			sb.WriteString("\n")
 		}
 		sb.WriteString("\n")
-		hint := "[o] web  [f] open  [i] insert"
-		// [d] download is only meaningful for designs — drawings and other
-		// item kinds don't have a component version we can hand to the
-		// STEP derivative endpoint.
-		if m.details.Typename == "DesignItem" {
-			hint += "  [d] step"
-		}
-		if m.tabsAvailable() {
-			hint += "  [1-4] tabs"
+		var hint string
+		if m.tabsAvailable() && m.detailsTab != tabDetails {
+			// Uses / Where Used / Drawings tab — show navigation hints for the tab rows.
+			hint = "[↑↓/ws] select  [enter] show in location  [1-4] tabs"
+		} else {
+			hint = "[u] web  [o] Fusion  [i] insert"
+			// [shift+d] download is only meaningful for designs — drawings and other
+			// item kinds don't have a component version we can hand to the
+			// STEP derivative endpoint.
+			if m.details.Typename == "DesignItem" {
+				hint += "  [shift+d] step"
+			}
+			if m.tabsAvailable() {
+				hint += "  [1-4] tabs"
+			}
 		}
 		sb.WriteString(sc.itemDimDetails.Render(hint))
 	}
