@@ -150,7 +150,6 @@ func TestGetProjects_FiltersInactive(t *testing.T) {
 							"id":            "p-active-lower",
 							"name":          "ActiveLower",
 							"projectStatus": "active",
-							"projectType":   "FUSION",
 							"alternativeIdentifiers": map[string]any{
 								"dataManagementAPIProjectId": "ap1",
 							},
@@ -159,7 +158,6 @@ func TestGetProjects_FiltersInactive(t *testing.T) {
 							"id":            "p-inactive-upper",
 							"name":          "InactiveUpper",
 							"projectStatus": "INACTIVE",
-							"projectType":   "FUSION",
 							"alternativeIdentifiers": map[string]any{
 								"dataManagementAPIProjectId": "ap2",
 							},
@@ -168,7 +166,6 @@ func TestGetProjects_FiltersInactive(t *testing.T) {
 							"id":            "p-inactive-mixed",
 							"name":          "InactiveMixed",
 							"projectStatus": "Inactive",
-							"projectType":   "FUSION",
 							"alternativeIdentifiers": map[string]any{
 								"dataManagementAPIProjectId": "ap3",
 							},
@@ -177,7 +174,6 @@ func TestGetProjects_FiltersInactive(t *testing.T) {
 							"id":            "p-active-cap",
 							"name":          "ActiveCap",
 							"projectStatus": "Active",
-							"projectType":   "FUSION",
 							"alternativeIdentifiers": map[string]any{
 								"dataManagementAPIProjectId": "ap4",
 							},
@@ -265,15 +261,15 @@ func TestGetItems_TypenameMapping(t *testing.T) {
 	}
 }
 
-func TestGetItems_RequestsTipRootComponentVersion(t *testing.T) {
-	// The async classifier needs tipRootComponentVersion.id per design
-	// row to issue its occurrences probe without a second round-trip.
+func TestGetItems_RequestsTipRootModel(t *testing.T) {
+	// The async classifier needs tipRootModel.id per design row to
+	// issue its assembly-relations probe without a second round-trip.
 	// This test pins the inline fragment into the request so a future
 	// query refactor can't silently strip it.
 	var sawFragment bool
 	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
 		if strings.Contains(req.Query, "... on DesignItem") &&
-			strings.Contains(req.Query, "tipRootComponentVersion") {
+			strings.Contains(req.Query, "tipRootModel { id }") {
 			sawFragment = true
 		}
 		return testutil.GraphQLResponse{Data: map[string]any{
@@ -289,11 +285,11 @@ func TestGetItems_RequestsTipRootComponentVersion(t *testing.T) {
 		t.Fatalf("GetItems: %v", err)
 	}
 	if !sawFragment {
-		t.Errorf("query did not include ... on DesignItem { tipRootComponentVersion { id } }")
+		t.Errorf("query did not include ... on DesignItem { tipRootModel { id } }")
 	}
 }
 
-func TestGetItems_PopulatesComponentVersionID(t *testing.T) {
+func TestGetItems_PopulatesRootModelID(t *testing.T) {
 	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
 		return testutil.GraphQLResponse{Data: map[string]any{
 			"itemsByFolder": map[string]any{
@@ -304,7 +300,7 @@ func TestGetItems_PopulatesComponentVersionID(t *testing.T) {
 						"__typename":               "DesignItem",
 						"id":                       "i1",
 						"name":                     "WithRoot",
-						"tipRootComponentVersion":  map[string]any{"id": "urn:cv:1"},
+						"tipRootModel": map[string]any{"id": "urn:model:1"},
 					},
 					// Design without tipRoot (milestone-less, mid-translation, etc.)
 					{
@@ -327,14 +323,14 @@ func TestGetItems_PopulatesComponentVersionID(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("len = %d, want 3 (%+v)", len(got), got)
 	}
-	if got[0].ComponentVersionID != "urn:cv:1" {
-		t.Errorf("design[0].ComponentVersionID = %q, want urn:cv:1", got[0].ComponentVersionID)
+	if got[0].RootModelID != "urn:model:1" {
+		t.Errorf("design[0].RootModelID = %q, want urn:model:1", got[0].RootModelID)
 	}
-	if got[1].ComponentVersionID != "" {
-		t.Errorf("design[1].ComponentVersionID = %q, want empty (no tipRoot)", got[1].ComponentVersionID)
+	if got[1].RootModelID != "" {
+		t.Errorf("design[1].RootModelID = %q, want empty (no tipRoot)", got[1].RootModelID)
 	}
-	if got[2].ComponentVersionID != "" {
-		t.Errorf("drawing.ComponentVersionID = %q, want empty", got[2].ComponentVersionID)
+	if got[2].RootModelID != "" {
+		t.Errorf("drawing.RootModelID = %q, want empty", got[2].RootModelID)
 	}
 	// Designs start with empty Subtype — the async classifier fills
 	// it in later. Drawings, by contrast, are sub-typed synchronously

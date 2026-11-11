@@ -146,7 +146,7 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 				projects(pagination: { limit: 50 }) {
 					pagination { cursor }
 					results {
-						id name fusionWebUrl projectStatus projectType
+						id name fusionWebUrl projectStatus
 						alternativeIdentifiers { dataManagementAPIProjectId }
 					}
 				}
@@ -158,7 +158,7 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 				projects(pagination: { cursor: $cursor, limit: 50 }) {
 					pagination { cursor }
 					results {
-						id name fusionWebUrl projectStatus projectType
+						id name fusionWebUrl projectStatus
 						alternativeIdentifiers { dataManagementAPIProjectId }
 					}
 				}
@@ -170,7 +170,6 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 		Name                   string `json:"name"`
 		FusionWebURL           string `json:"fusionWebUrl"`
 		ProjectStatus          string `json:"projectStatus"`
-		ProjectType            string `json:"projectType"`
 		AlternativeIdentifiers struct {
 			DataManagementAPIProjectID string `json:"dataManagementAPIProjectId"`
 		} `json:"alternativeIdentifiers"`
@@ -274,7 +273,7 @@ func GetProjectItems(ctx context.Context, token, projectID string) ([]NavItem, e
 				pagination { cursor }
 				results {
 					__typename id name
-					... on DesignItem { tipRootComponentVersion { id } }
+					... on DesignItem { tipRootModel { id } }
 				}
 			}
 		}`
@@ -284,7 +283,7 @@ func GetProjectItems(ctx context.Context, token, projectID string) ([]NavItem, e
 				pagination { cursor }
 				results {
 					__typename id name
-					... on DesignItem { tipRootComponentVersion { id } }
+					... on DesignItem { tipRootModel { id } }
 				}
 			}
 		}`
@@ -325,7 +324,7 @@ func GetItems(ctx context.Context, token, hubID, folderID string) ([]NavItem, er
 				pagination { cursor }
 				results {
 					__typename id name
-					... on DesignItem { tipRootComponentVersion { id } }
+					... on DesignItem { tipRootModel { id } }
 				}
 			}
 		}`
@@ -335,7 +334,7 @@ func GetItems(ctx context.Context, token, hubID, folderID string) ([]NavItem, er
 				pagination { cursor }
 				results {
 					__typename id name
-					... on DesignItem { tipRootComponentVersion { id } }
+					... on DesignItem { tipRootModel { id } }
 				}
 			}
 		}`
@@ -374,7 +373,7 @@ type itemResult struct {
 	Name     string `json:"name"`
 	TipRoot  *struct {
 		ID string `json:"id"`
-	} `json:"tipRootComponentVersion,omitempty"`
+	} `json:"tipRootModel,omitempty"`
 }
 
 // navItemFromResult maps a raw items-list row to a NavItem. Three
@@ -383,11 +382,11 @@ type itemResult struct {
 //  1. GraphQL __typename — authoritative when APS recognises the row
 //     (DesignItem, DrawingItem, ConfiguredDesignItem, Folder).
 //  2. Filename extension — refines drawings into dwg/template and
-//     covers Fusion Electronics types that may not be exposed as
-//     distinct typenames (or whose typenames we haven't confirmed
-//     because APS production disables __schema introspection).
-//  3. tipRootComponentVersion.id — captured per design row so the
-//     async assembly classifier can probe occurrences without a
+//     covers Fusion Electronics types. The v3 Item interface has only
+//     four concrete types (BasicItem, ConfiguredDesignItem, DesignItem,
+//     DrawingItem), so electronics rows have no typename of their own.
+//  3. tipRootModel.id — captured per design row so the
+//     async assembly classifier can probe assembly relations without a
 //     second round-trip.
 func navItemFromResult(it itemResult) NavItem {
 	n := navItemFromTypename(it.ID, it.Name, it.Typename)
@@ -395,9 +394,8 @@ func navItemFromResult(it itemResult) NavItem {
 	// If the typename mapping fell through to "unknown", try to
 	// recover a Kind from the filename extension. This is how
 	// Electronics items (schematic/PCB/ECAD project) are identified
-	// today — their APS typenames aren't documented and full schema
-	// introspection is blocked, so the file extension is the most
-	// reliable signal we have.
+	// today — the schema has no electronics item type, so the file
+	// extension is the most reliable signal we have.
 	if n.Kind == "unknown" {
 		if k := kindFromExtension(it.Name); k != "" {
 			n.Kind = k
@@ -412,7 +410,7 @@ func navItemFromResult(it itemResult) NavItem {
 	}
 
 	if n.Kind == "design" && it.TipRoot != nil {
-		n.ComponentVersionID = it.TipRoot.ID
+		n.RootModelID = it.TipRoot.ID
 	}
 	return n
 }

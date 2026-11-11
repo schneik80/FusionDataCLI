@@ -20,18 +20,22 @@ const (
 )
 
 // RequestSTEPDerivative asks the Manufacturing Data Model API to generate
-// (or report progress on) a STEP derivative for the given component
-// version. The same query both kicks off generation (the first call) and
-// reports current status thereafter — APS keeps the work going between
-// calls, so callers should poll until status is SUCCESS or FAILED.
+// (or report progress on) a STEP derivative for the given root model.
+// The same query both kicks off generation (the first call) and reports
+// current status thereafter — APS keeps the work going between calls, so
+// callers should poll until status is SUCCESS or FAILED.
+//
+// The API reports NOT_GENERATED, PENDING and IN_PROGRESS while it
+// works; those are returned as StepStatusPending. TIMEOUT is terminal
+// and is returned as StepStatusFailed.
 //
 // Returns the derivative status, the signed download URL once status is
 // SUCCESS (empty otherwise), and any transport / parse error.
-func RequestSTEPDerivative(ctx context.Context, token, componentVersionID string) (status, signedURL string, err error) {
+func RequestSTEPDerivative(ctx context.Context, token, modelID string) (status, signedURL string, err error) {
 	const q = `
-		query GetGeometry($componentVersionId: ID!) {
-			componentVersion(componentVersionId: $componentVersionId) {
-				derivatives(derivativeInput: {outputFormat: STEP, generate: true}) {
+		query GetGeometry($modelId: ID!) {
+			model(modelId: $modelId) {
+				derivatives(derivativeInput: { targetFormat: [STEP], generate: true }) {
 					expires
 					signedUrl
 					status
@@ -40,28 +44,37 @@ func RequestSTEPDerivative(ctx context.Context, token, componentVersionID string
 			}
 		}`
 
-	data, err := gqlQuery(ctx, token, q, map[string]any{"componentVersionId": componentVersionID})
+	data, err := gqlQuery(ctx, token, q, map[string]any{"modelId": modelID})
 	if err != nil {
 		return "", "", fmt.Errorf("step derivative: %w", err)
 	}
 
 	var raw struct {
-		ComponentVersion struct {
+		Model struct {
 			Derivatives []struct {
 				Status       string `json:"status"`
 				SignedURL    string `json:"signedUrl"`
 				OutputFormat string `json:"outputFormat"`
 			} `json:"derivatives"`
-		} `json:"componentVersion"`
+		} `json:"model"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return "", "", fmt.Errorf("step derivative decode: %w", err)
 	}
-	if len(raw.ComponentVersion.Derivatives) == 0 {
-		return "", "", fmt.Errorf("no STEP derivative returned")
+	for _, d := range raw.Model.Derivatives {
+		if !strings.EqualFold(d.OutputFormat, "STEP") {
+			continue
+		}
+		switch st := strings.ToUpper(d.Status); st {
+		case StepStatusSuccess:
+			return StepStatusSuccess, d.SignedURL, nil
+		case StepStatusFailed, "TIMEOUT":
+			return StepStatusFailed, "", nil
+		default:
+			return StepStatusPending, "", nil
+		}
 	}
-	d := raw.ComponentVersion.Derivatives[0]
-	return strings.ToUpper(d.Status), d.SignedURL, nil
+	return "", "", fmt.Errorf("no STEP derivative returned")
 }
 
 // DownloadFile streams an HTTP GET response to destPath. APS signed URLs

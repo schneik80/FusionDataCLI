@@ -11,20 +11,22 @@
     "lastModifiedOn": "2024-02-20T14:00:00Z",
     "lastModifiedBy": {"firstName": "Grace", "lastName": "Hopper"},
     "fusionWebUrl": "https://fusion.example/widget-a",
-    "tipVersion": {"versionNumber": 3},
-    "tipRootComponentVersion": {
-      "id": "urn:cv:xyz",
-      "partNumber": "WGT-001",
-      "partDescription": "The widget A",
-      "materialName": "Aluminum 6061",
-      "isMilestone": true
+    "tipRootModel": {
+      "id": "urn:model:xyz",
+      "materialName": {"value": "Aluminum 6061"},
+      "component": {
+        "partNumber": {"value": "WGT-001"},
+        "description": {"value": "The widget A"}
+      }
+    },
+    "history": {
+      "pagination": {"cursor": null},
+      "results": [
+        {"__typename": "VersionCreatedHistoryChange", "timestamp": "2024-02-21T09:00:00.000Z", "description": "Release candidate", "author": {"firstName": "Grace", "lastName": "Hopper"}},
+        {"__typename": "ModelWrittenHistoryChange", "timestamp": "2024-02-20T14:00:00.000Z", "description": "third edit", "author": {"firstName": "Grace", "lastName": "Hopper"}},
+        {"__typename": "ModelWrittenHistoryChange", "timestamp": "2024-01-20T11:00:00.000Z", "description": "second save", "author": {"firstName": "Ada", "lastName": "Lovelace"}},
+        {"__typename": "ModelWrittenHistoryChange", "timestamp": "2024-01-15T10:30:45.000Z", "description": "first", "author": {"firstName": "Ada", "lastName": "Lovelace"}}
+      ]
     }
-  },
-  "itemVersions": {
-    "results": [
-      {"versionNumber": 1, "name": "first", "createdOn": "2024-01-15T10:30:45Z", "createdBy": {"firstName": "Ada", "lastName": "Lovelace"}},
-      {"versionNumber": 2, "name": "second save", "createdOn": "2024-01-20T11:00:00Z", "createdBy": {"firstName": "Ada", "lastName": "Lovelace"}},
-      {"versionNumber": 3, "name": "third edit", "createdOn": "2024-02-20T14:00:00Z", "createdBy": {"firstName": "Grace", "lastName": "Hopper"}}
-    ]
   }
 }

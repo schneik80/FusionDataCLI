@@ -105,7 +105,7 @@ The full URL passed to the OS browser handler is shown in the status bar so it c
 
 ### STEP download
 
-Press `shift+d` on a selected design (after the details panel has finished loading) to export it to STEP. The CLI requests a STEP derivative from the APS Manufacturing Data Model (`componentVersion(...).derivatives(outputFormat: STEP, generate: true)`), polls every two seconds until status is `SUCCESS` or `FAILED`, and then streams the signed-URL response to:
+Press `shift+d` on a selected design (after the details panel has finished loading) to export it to STEP. The CLI requests a STEP derivative from the APS Manufacturing Data Model (`model(...).derivatives(derivativeInput: { targetFormat: [STEP], generate: true })`), polls every two seconds until status is `SUCCESS` or `FAILED`, and then streams the signed-URL response to:
 
 ```
 ~/Downloads/<design-name>-<YYYYMMDD-HHMMSS>.stp
@@ -113,7 +113,7 @@ Press `shift+d` on a selected design (after the details panel has finished loadi
 
 If the home directory cannot be determined the file is written to `os.TempDir()` instead. Filenames are sanitised to a safe whitelist (alphanumerics, dash, underscore, space, dot) so cross-platform paths always round-trip cleanly.
 
-`shift+d` is only valid on `DesignItem` rows that have a `tipRootComponentVersion` — drawings (`DrawingItem`), configured designs (`ConfiguredDesignItem`), folders, and projects are not supported by the derivatives endpoint. Pressing `shift+d` on those rows is a no-op with a status-bar hint. A second `shift+d` press while a download is already in flight is also rejected so polls don't pile up.
+`shift+d` is only valid on `DesignItem` rows that have a `tipRootModel` — drawings (`DrawingItem`), configured designs (`ConfiguredDesignItem`), folders, and projects are not supported by the derivatives endpoint. Pressing `shift+d` on those rows is a no-op with a status-bar hint. A second `shift+d` press while a download is already in flight is also rejected so polls don't pile up.
 
 ### Non-US hubs
 

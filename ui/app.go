@@ -48,8 +48,8 @@ const (
 
 // Details-pane tabs. tabDetails is the existing metadata view; the other
 // three are component-level cross-references on the selected design's
-// tipRootComponentVersion. They are only meaningful for DesignItems with a
-// populated RootComponentVersionID — for other item kinds the tab strip
+// tipRootModel. They are only meaningful for DesignItems with a
+// populated RootModelID — for other item kinds the tab strip
 // is hidden and only the Details view renders.
 type detailsTab int
 
@@ -100,15 +100,18 @@ type (
 	contentsLoadedMsg  struct{ items []api.NavItem }
 	detailsLoadedMsg   struct{ details *api.ItemDetails }
 	// usesLoadedMsg / whereUsedLoadedMsg / drawingsLoadedMsg deliver the
-	// async result of a per-tab fetch. cvid identifies which component
-	// version the data is for, so a stale response that arrives after the
+	// async result of a per-tab fetch. modelID identifies which root
+	// model the data is for, so a stale response that arrives after the
 	// user has navigated away can still be cached without overwriting
 	// state for the new selection.
-	usesLoadedMsg      struct{ cvid string; items []api.ComponentRef; err error }
-	whereUsedLoadedMsg struct{ cvid string; items []api.ComponentRef; err error }
+	usesLoadedMsg      struct{ modelID string; items []api.ComponentRef; err error }
+	whereUsedLoadedMsg struct{ modelID, itemID string; items []api.ComponentRef; err error }
+	// whereUsedRelationsMsg follows a whereUsedLoadedMsg with the same
+	// rows, now tagged direct / indirect and re-sorted.
+	whereUsedRelationsMsg struct{ modelID string; items []api.ComponentRef }
 	// drawingsLoadedMsg key is the DesignItem.id (lineage URN), not a
-	// component-version id — drawings are aggregated across all versions
-	// of the design, so we cache by the stable item identity.
+	// root-model id — drawings hang off the design item itself,
+	// so we cache by the stable item identity.
 	drawingsLoadedMsg  struct{ itemID string; items []api.DrawingRef;   err error }
 	// itemLocationLoadedMsg is the result of GetItemLocation, used to
 	// orchestrate "Show in Location" navigation from the Uses /
@@ -139,10 +142,10 @@ type (
 		status    string
 		signedURL string
 		err       error
-		// cvid + name are echoed back so the Update handler can keep
+		// modelID + name are echoed back so the Update handler can keep
 		// polling / continue with the download without having to look
 		// the design back up in the model (which may have moved on).
-		cvid string
+		modelID string
 		name string
 	}
 	// stepDoneMsg fires after the STEP file has been written to disk
@@ -235,13 +238,13 @@ type Model struct {
 	// flow works without re-pressing the tab key per item.
 	detailsTab detailsTab
 	// Per-tab loading flags (true while a fetch is in flight for the
-	// currently-selected component version). Keyed by tab index.
+	// currently-selected root model). Keyed by tab index.
 	tabLoading [numDetailsTabs]bool
 	// Per-tab last error message. Cleared on successful fetch or on
 	// item change. Shown verbatim in the tab content area.
 	tabErr [numDetailsTabs]string
-	// Per-tab caches keyed by ComponentVersion.id. The cvid is whatever
-	// m.details.RootComponentVersionID was when the fetch started, so
+	// Per-tab caches keyed by the root Model.id. The modelID is whatever
+	// m.details.RootModelID was when the fetch started, so
 	// async responses arriving after a navigation are still stored under
 	// the right key and don't pollute the active item's view.
 	usesCache      map[string][]api.ComponentRef
@@ -567,25 +570,25 @@ func loadItemsCmd(token, hubID, folderID string) tea.Cmd {
 // call itself rate-limits via a package-level semaphore (8 concurrent),
 // so a fanout of 50 cmds here doesn't translate into 50 simultaneous
 // HTTPS connections against the gateway.
-func classifyDesignCmd(token, itemID, componentVersionID string, gen int) tea.Cmd {
+func classifyDesignCmd(token, itemID, modelID string, gen int) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
 		defer cancel()
-		isAsm, err := api.ClassifyAssembly(ctx, token, componentVersionID)
+		isAsm, err := api.ClassifyAssembly(ctx, token, modelID)
 		return itemClassifiedMsg{gen: gen, itemID: itemID, isAssembly: isAsm, err: err}
 	}
 }
 
 // classifyContentsCmd fans out classifyDesignCmd over every DesignItem
-// in items that has a known componentVersionID. Returns nil when nothing
+// in items that has a known modelID. Returns nil when nothing
 // needs classifying so Update can return (m, nil) cleanly. The cmds run
 // concurrently under tea.Batch; the gateway-side concurrency cap lives
 // in api.ClassifyAssembly's semaphore.
 func classifyContentsCmd(token string, items []api.NavItem, gen int) tea.Cmd {
 	var cmds []tea.Cmd
 	for _, it := range items {
-		if it.Kind == "design" && it.ComponentVersionID != "" && it.Subtype == "" {
-			cmds = append(cmds, classifyDesignCmd(token, it.ID, it.ComponentVersionID, gen))
+		if it.Kind == "design" && it.RootModelID != "" && it.Subtype == "" {
+			cmds = append(cmds, classifyDesignCmd(token, it.ID, it.RootModelID, gen))
 		}
 	}
 	if len(cmds) == 0 {
@@ -606,39 +609,56 @@ func loadDetailsCmd(token, hubID, itemID string) tea.Cmd {
 	}
 }
 
-// Per-tab fetch commands. cvid is captured into the message so a stale
+// Per-tab fetch commands. modelID is captured into the message so a stale
 // response that arrives after the user navigated to a different item is
-// still cached under the right ComponentVersion id.
+// still cached under the right root model id.
 
-func loadUsesCmd(token, cvid string) tea.Cmd {
+func loadUsesCmd(token, modelID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
 		defer cancel()
-		items, err := api.GetOccurrences(ctx, token, cvid)
-		return usesLoadedMsg{cvid: cvid, items: items, err: err}
+		items, err := api.GetOccurrences(ctx, token, modelID)
+		return usesLoadedMsg{modelID: modelID, items: items, err: err}
 	}
 }
 
 // loadDrawingUsesCmd fetches the source design for a drawing item.
 // "Uses" on a drawing is the design the drawing was made from. The
 // resulting message reuses usesLoadedMsg so the receiver doesn't need
-// to know which underlying API was called — the cvid field carries
+// to know which underlying API was called — the modelID field carries
 // the drawing item's id (acting as the cache key for this code path).
 func loadDrawingUsesCmd(token, hubID, drawingItemID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
 		defer cancel()
 		items, err := api.GetDrawingSource(ctx, token, hubID, drawingItemID)
-		return usesLoadedMsg{cvid: drawingItemID, items: items, err: err}
+		return usesLoadedMsg{modelID: drawingItemID, items: items, err: err}
 	}
 }
 
-func loadWhereUsedCmd(token, cvid string) tea.Cmd {
+// loadWhereUsedCmd fetches the items that reference a design. The
+// lookup itself is by hub + item id; modelID is only the cache key, so
+// the result lands next to the design's Uses entry.
+func loadWhereUsedCmd(token, hubID, itemID, modelID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
 		defer cancel()
-		items, err := api.GetWhereUsed(ctx, token, cvid)
-		return whereUsedLoadedMsg{cvid: cvid, items: items, err: err}
+		items, err := api.GetWhereUsed(ctx, token, hubID, itemID)
+		return whereUsedLoadedMsg{modelID: modelID, itemID: itemID, items: items, err: err}
+	}
+}
+
+// loadWhereUsedRelationsCmd is the follow-up to loadWhereUsedCmd. The
+// rows are already on screen; this works out which design rows hold the
+// item directly and which only through a sub-assembly.
+func loadWhereUsedRelationsCmd(token, itemID, modelID string, items []api.ComponentRef) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
+		defer cancel()
+		return whereUsedRelationsMsg{
+			modelID: modelID,
+			items:   api.GetWhereUsedRelations(ctx, token, itemID, items),
+		}
 	}
 }
 
@@ -714,32 +734,32 @@ func insertInFusionCmd(fileID, expectedProjectAltID, expectedProjectName, expect
 // requestStepCmd issues the GraphQL query that initiates STEP generation
 // (the first call) and reports its current status (subsequent calls). The
 // query is idempotent: APS keeps generating the derivative between calls.
-func requestStepCmd(token, cvid, name string) tea.Cmd {
+func requestStepCmd(token, modelID, name string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		status, signedURL, err := api.RequestSTEPDerivative(ctx, token, cvid)
+		status, signedURL, err := api.RequestSTEPDerivative(ctx, token, modelID)
 		return stepStatusMsg{
 			status:    status,
 			signedURL: signedURL,
 			err:       err,
-			cvid:      cvid,
+			modelID:      modelID,
 			name:      name,
 		}
 	}
 }
 
 // pollStepCmdAfter waits d, then re-issues the STEP status query.
-func pollStepCmdAfter(d time.Duration, token, cvid, name string) tea.Cmd {
+func pollStepCmdAfter(d time.Duration, token, modelID, name string) tea.Cmd {
 	return tea.Tick(d, func(time.Time) tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		status, signedURL, err := api.RequestSTEPDerivative(ctx, token, cvid)
+		status, signedURL, err := api.RequestSTEPDerivative(ctx, token, modelID)
 		return stepStatusMsg{
 			status:    status,
 			signedURL: signedURL,
 			err:       err,
-			cvid:      cvid,
+			modelID:      modelID,
 			name:      name,
 		}
 	})
@@ -969,20 +989,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Reset per-tab error/loading flags — they applied to the
 		// previous selection — and kick off a fetch for the active
-		// tab if it isn't Details and the new cvid isn't cached.
+		// tab if it isn't Details and the new modelID isn't cached.
 		m.resetTabState()
 		return m, m.maybeLoadActiveTab()
 
 	case usesLoadedMsg:
 		if msg.err == nil && m.usesCache != nil {
-			m.usesCache[msg.cvid] = msg.items
+			m.usesCache[msg.modelID] = msg.items
 		}
 		// usesCacheKey() returns whatever string the active item uses
-		// to key its Uses entry — DesignItem.RootComponentVersionID
+		// to key its Uses entry — DesignItem.RootModelID
 		// for designs, DesignItem.ID for drawings. The response's
-		// msg.cvid carries the same string the load command sent, so
+		// msg.modelID carries the same string the load command sent, so
 		// matching here confirms the response is for the current item.
-		if m.details != nil && m.usesCacheKey() == msg.cvid {
+		if m.details != nil && m.usesCacheKey() == msg.modelID {
 			m.tabLoading[tabUses] = false
 			if msg.err != nil {
 				m.tabErr[tabUses] = msg.err.Error()
@@ -994,9 +1014,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case whereUsedLoadedMsg:
 		if msg.err == nil && m.whereUsedCache != nil {
-			m.whereUsedCache[msg.cvid] = msg.items
+			m.whereUsedCache[msg.modelID] = msg.items
 		}
-		if m.details != nil && m.details.RootComponentVersionID == msg.cvid {
+		if m.details != nil && m.details.RootModelID == msg.modelID {
 			m.tabLoading[tabWhereUsed] = false
 			if msg.err != nil {
 				m.tabErr[tabWhereUsed] = msg.err.Error()
@@ -1004,6 +1024,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tabErr[tabWhereUsed] = ""
 			}
 		}
+		// Rows are shown now; the direct / indirect tags follow.
+		if msg.err == nil && api.NeedsWhereUsedRelations(msg.items) {
+			return m, loadWhereUsedRelationsCmd(m.token, msg.itemID, msg.modelID, msg.items)
+		}
+		return m, nil
+
+	case whereUsedRelationsMsg:
+		m.applyWhereUsedRelations(msg.modelID, msg.items)
 		return m, nil
 
 	case drawingsLoadedMsg:
@@ -1057,7 +1085,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			// PENDING (or any other transient state) — keep polling.
 			m.statusMsg = "Generating STEP for " + msg.name + "… (this may take a moment)"
-			return m, pollStepCmdAfter(2*time.Second, m.token, msg.cvid, msg.name)
+			return m, pollStepCmdAfter(2*time.Second, m.token, msg.modelID, msg.name)
 		}
 
 	case stepDoneMsg:
@@ -1518,6 +1546,38 @@ func (m *Model) moveTabCursor(delta int) {
 	}
 }
 
+// applyWhereUsedRelations swaps the tagged, re-sorted Where Used rows
+// in for the untagged ones already cached. Tagging re-orders the list
+// (direct rows first), so if this design's Where Used tab has a row
+// selected below the first, the cursor follows it to its new position.
+func (m *Model) applyWhereUsedRelations(modelID string, items []api.ComponentRef) {
+	old, ok := m.whereUsedCache[modelID]
+	if !ok || len(old) != len(items) {
+		// The cache was reset or replaced while the tags were loading.
+		return
+	}
+	m.whereUsedCache[modelID] = items
+	if m.details == nil || m.details.RootModelID != modelID {
+		return
+	}
+	// A cursor still on the first row has not been moved; leave it at
+	// the top, where the direct rows now are. Likewise if the tab is not
+	// the one showing.
+	cur := m.tabCursors[tabWhereUsed]
+	if cur <= 0 || cur >= len(old) || m.detailsTab != tabWhereUsed {
+		m.tabCursors[tabWhereUsed] = 0
+		m.tabScrolls[tabWhereUsed] = 0
+		return
+	}
+	for i, r := range items {
+		if r.ID == old[cur].ID {
+			m.tabCursors[tabWhereUsed] = i
+			break
+		}
+	}
+	m.moveTabCursor(0) // re-clamp the scroll around the cursor
+}
+
 // moveCursor moves the cursor in the active column and adjusts scroll.
 func (m *Model) moveCursor(delta int) {
 	col := m.activeCol
@@ -1715,7 +1775,7 @@ func (m Model) navigateRight() (Model, tea.Cmd) {
 // selected item. The order is the same as the detailsTab enum so the
 // strip renders left-to-right consistently across item types:
 //
-//   - DesignItem with a tipRootComponentVersion → all four tabs
+//   - DesignItem with a tipRootModel → all four tabs
 //     (Details, Uses, Where Used, Drawings).
 //   - DrawingItem → Details + Uses (the source design). Where Used
 //     and Drawings don't apply to drawings.
@@ -1727,7 +1787,7 @@ func (m Model) availableTabs() []detailsTab {
 	}
 	switch m.details.Typename {
 	case "DesignItem":
-		if m.details.RootComponentVersionID != "" {
+		if m.details.RootModelID != "" {
 			return []detailsTab{tabDetails, tabUses, tabWhereUsed, tabDrawings}
 		}
 	case "DrawingItem":
@@ -1803,8 +1863,8 @@ func (m *Model) resetTabState() {
 // usesCacheKey returns the cache lookup key for the Uses tab. Two
 // item types use this tab and they key their results differently:
 //
-//   - DesignItem: keyed by tipRootComponentVersion.id, because the
-//     underlying GraphQL query is rooted at that componentVersion.
+//   - DesignItem: keyed by tipRootModel.id, because the
+//     underlying GraphQL query is rooted at that model.
 //   - DrawingItem: keyed by the DrawingItem lineage URN, because the
 //     drawing's source is stable across the item's versions.
 //
@@ -1817,7 +1877,7 @@ func (m Model) usesCacheKey() string {
 	if m.details.Typename == "DrawingItem" {
 		return m.details.ID
 	}
-	return m.details.RootComponentVersionID
+	return m.details.RootModelID
 }
 
 // currentTabRowCount returns the number of rows in the active
@@ -1827,14 +1887,14 @@ func (m Model) currentTabRowCount() int {
 	if m.details == nil {
 		return 0
 	}
-	cvid := m.details.RootComponentVersionID
+	modelID := m.details.RootModelID
 	switch m.detailsTab {
 	case tabUses:
 		return len(m.usesCache[m.usesCacheKey()])
 	case tabWhereUsed:
-		return len(m.whereUsedCache[cvid])
+		return len(m.whereUsedCache[modelID])
 	case tabDrawings:
-		// Drawings cache is keyed by DesignItem.id, not cvid — see
+		// Drawings cache is keyed by DesignItem.id, not modelID — see
 		// loadDrawingsCmd / GetDrawingsForDesign for why.
 		return len(m.drawingsCache[m.details.ID])
 	}
@@ -1850,7 +1910,7 @@ func (m Model) showInLocation() (Model, tea.Cmd) {
 	if !m.tabsAvailable() || m.detailsTab == tabDetails || m.details == nil {
 		return m, nil
 	}
-	cvid := m.details.RootComponentVersionID
+	modelID := m.details.RootModelID
 	cur := m.tabCursors[m.detailsTab]
 	var targetID, targetName string
 	switch m.detailsTab {
@@ -1865,7 +1925,7 @@ func (m Model) showInLocation() (Model, tea.Cmd) {
 			targetName = items[cur].Name
 		}
 	case tabWhereUsed:
-		items := m.whereUsedCache[cvid]
+		items := m.whereUsedCache[modelID]
 		if cur < 0 || cur >= len(items) {
 			return m, nil
 		}
@@ -1968,22 +2028,22 @@ func (m *Model) maybeLoadActiveTab() tea.Cmd {
 	case tabWhereUsed:
 		// Where Used only applies to DesignItems; the strip hides this
 		// tab for other item types so we shouldn't even reach here in
-		// those cases. The empty-cvid guard is defensive.
-		cvid := m.details.RootComponentVersionID
-		if cvid == "" {
+		// those cases. The empty-modelID guard is defensive.
+		modelID := m.details.RootModelID
+		if modelID == "" {
 			return nil
 		}
-		if _, ok := m.whereUsedCache[cvid]; ok {
+		if _, ok := m.whereUsedCache[modelID]; ok {
 			m.tabLoading[tabWhereUsed] = false
 			m.tabErr[tabWhereUsed] = ""
 			return nil
 		}
 		m.tabLoading[tabWhereUsed] = true
 		m.tabErr[tabWhereUsed] = ""
-		return loadWhereUsedCmd(m.token, cvid)
+		return loadWhereUsedCmd(m.token, m.selectedHubID, m.details.ID, modelID)
 	case tabDrawings:
 		// Drawings cache + load are keyed by DesignItem.id (lineage),
-		// not cvid — see GetDrawingsForDesign for the rationale.
+		// not modelID — see GetDrawingsForDesign for the rationale.
 		itemID := m.details.ID
 		if _, ok := m.drawingsCache[itemID]; ok {
 			m.tabLoading[tabDrawings] = false
@@ -2002,7 +2062,7 @@ func (m *Model) maybeLoadActiveTab() tea.Cmd {
 // they're served synchronously and no API call is made. The active
 // details-pane tab (preserved across item changes) is re-evaluated for
 // the new selection — if it's a non-Details tab and that data isn't
-// cached for the new component version, an additional fetch fires.
+// cached for the new root model, an additional fetch fires.
 func (m *Model) maybeLoadDetails() tea.Cmd {
 	item := m.selectedItem(m.activeCol)
 	if item == nil || item.IsContainer {
@@ -2152,10 +2212,10 @@ func (m Model) projectNameByID(projectID string) string {
 
 // downloadStep starts the STEP-translation + download workflow for the
 // currently selected design. Like [o], it requires the details panel to
-// be loaded so we have the tipRootComponentVersion id needed to ask the
+// be loaded so we have the tipRootModel id needed to ask the
 // MFG Data Model API for a STEP derivative. STEP export is only valid
 // for DesignItems (drawings, configured designs and basic items aren't
-// supported by the componentVersion-derivatives endpoint here).
+// supported by the model-derivatives endpoint here).
 //
 // The translation is asynchronous: this function dispatches the initial
 // GraphQL request and the Update loop drives polling + the eventual
@@ -2181,13 +2241,13 @@ func (m Model) downloadStep() (Model, tea.Cmd) {
 		m.statusMsg = "STEP download is only supported for designs"
 		return m, nil
 	}
-	if m.details.RootComponentVersionID == "" {
-		m.statusMsg = "No component version available for this design"
+	if m.details.RootModelID == "" {
+		m.statusMsg = "No root model available for this design"
 		return m, nil
 	}
 	m.downloadInProgress = true
 	m.statusMsg = "Requesting STEP translation for " + m.details.Name + "…"
-	return m, requestStepCmd(m.token, m.details.RootComponentVersionID, m.details.Name)
+	return m, requestStepCmd(m.token, m.details.RootModelID, m.details.Name)
 }
 
 // selectedHubName returns the display name of the currently-selected hub,
@@ -2255,7 +2315,7 @@ func (m Model) selectHub() (Model, tea.Cmd) {
 	m.details = nil
 	m.folderStack = nil
 	m.loadPinsForCurrentHub()
-	// Reset details-pane tabs on hub change. The component-version IDs in
+	// Reset details-pane tabs on hub change. The root-model IDs in
 	// the per-tab caches belong to the previous hub's projects and aren't
 	// reachable from the new hub anyway.
 	m.detailsTab = tabDetails
@@ -3243,7 +3303,7 @@ func (m Model) viewDetailsColumn(width, height int, sc *styleCache) string {
 		} else {
 			hint = "[u] web  [o] Fusion  [i] insert"
 			// [shift+d] download is only meaningful for designs — drawings and other
-			// item kinds don't have a component version we can hand to the
+			// item kinds don't have a root model we can hand to the
 			// STEP derivative endpoint.
 			if m.details.Typename == "DesignItem" {
 				hint += "  [shift+d] step"
@@ -3302,7 +3362,7 @@ func (m Model) tabContentLines(width, visibleH int, sc *styleCache) []string {
 	if m.details == nil {
 		return []string{sc.itemDimDetails.Render("No item selected")}
 	}
-	cvid := m.details.RootComponentVersionID
+	modelID := m.details.RootModelID
 	tab := m.detailsTab
 
 	if m.tabLoading[tab] {
@@ -3330,12 +3390,12 @@ func (m Model) tabContentLines(width, visibleH int, sc *styleCache) []string {
 		}
 		return componentRefLines(items, cursor, scroll, visibleH, width)
 	case tabWhereUsed:
-		items, ok := m.whereUsedCache[cvid]
+		items, ok := m.whereUsedCache[modelID]
 		if !ok {
 			return []string{sc.itemDimDetails.Render("(not loaded)")}
 		}
 		if len(items) == 0 {
-			return []string{sc.itemDimDetails.Render("Not referenced by any other design")}
+			return []string{sc.itemDimDetails.Render("Not referenced by any other design or drawing")}
 		}
 		return componentRefLines(items, cursor, scroll, visibleH, width)
 	case tabDrawings:
@@ -3365,14 +3425,34 @@ func componentRefLines(refs []api.ComponentRef, cursor, scroll, visibleH, width 
 		if head == "" {
 			head = r.DesignItemName
 		}
+		// Where Used can return an item the API cannot read (every
+		// field null); keep the row visible instead of a blank line.
+		if head == "" {
+			head = "(unnamed item)"
+		}
+		var tags []string
 		if r.PartNumber != "" && r.PartNumber != head {
-			head = head + "  " + styleDetailKey.Render(r.PartNumber)
+			tags = append(tags, r.PartNumber)
+		}
+		// Where Used mixes drawings in with the referencing designs.
+		if r.Kind == "drawing" {
+			tags = append(tags, "drawing")
+		}
+		// Where Used also lists assemblies that only reach the design
+		// through a sub-assembly; say which rows are which.
+		if r.Relation != "" {
+			tags = append(tags, r.Relation)
+		}
+		// The top of a parent chain: a design nothing else uses. Only
+		// claimed once the row is confirmed as a current parent.
+		if r.Root && r.Relation != "" {
+			tags = append(tags, "root")
 		}
 		primary := styleItemNormal
 		if i == cursor {
 			primary = styleItemSelected
 		}
-		lines = append(lines, primary.Render(truncate(head, width)))
+		lines = append(lines, refHeadLine(head, tags, primary, width))
 		if len(lines) >= visibleH {
 			break
 		}
@@ -3381,6 +3461,30 @@ func componentRefLines(refs []api.ComponentRef, cursor, scroll, visibleH, width 
 		}
 	}
 	return lines
+}
+
+// refHeadLine lays out a row's name followed by its tags within width.
+// The fit is worked out on the plain text and the styles applied after:
+// truncating an already-styled string counts its colour codes as
+// columns and clips the trailing tags off a row that had room for them.
+// When space is short the name gives way first, down to a few
+// characters, so the tags (which are what tell rows apart) survive.
+// width is the content width; like every other row, the rendered line
+// is two columns wider for the name style's padding.
+func refHeadLine(name string, tags []string, nameStyle lipgloss.Style, width int) string {
+	if len(tags) == 0 {
+		return nameStyle.Render(truncateDisplay(name, width))
+	}
+	// The name style pads one column each side; its right pad plus this
+	// leading space make the two-space gap before the first tag.
+	const minName = 8
+	tagText := " " + strings.Join(tags, "  ")
+	nameW := width - lipgloss.Width(tagText) - 1
+	if nameW < minName {
+		nameW = min(minName, width)
+		tagText = truncateDisplay(tagText, width-nameW-1)
+	}
+	return nameStyle.Render(truncateDisplay(name, nameW)) + styleDetailKey.Render(tagText)
 }
 
 // drawingRefLines renders a windowed list of DrawingRef rows. Same
@@ -3497,12 +3601,12 @@ func buildDetailLines(d *api.ItemDetails, width int, sc *styleCache) []string {
 	// Version history
 	if len(d.Versions) > 0 {
 		add(heading("Versions"))
-		for i := len(d.Versions) - 1; i >= 0; i-- {
-			if len(d.Versions)-1-i >= 10 {
+		// d.Versions is newest first; show the ten most recent.
+		for i, v := range d.Versions {
+			if i >= 10 {
 				add(styleItemDim.Render(fmt.Sprintf("  … %d more", len(d.Versions)-10)))
 				break
 			}
-			v := d.Versions[i]
 			date := ""
 			if !v.CreatedOn.IsZero() {
 				date = v.CreatedOn.Format("Jan 02 2006")

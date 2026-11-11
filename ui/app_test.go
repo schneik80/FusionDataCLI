@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/schneik80/FusionDataCLI/api"
 	"github.com/schneik80/FusionDataCLI/auth"
@@ -380,7 +381,7 @@ func TestBreadcrumb_HitDetection(t *testing.T) {
 }
 
 // designModelWithTabs returns a stateBrowsing Model whose currently
-// selected item is a DesignItem with a populated RootComponentVersionID,
+// selected item is a DesignItem with a populated RootModelID,
 // so the four-tab strip is available. Used by tab-dispatch tests.
 func designModelWithTabs() Model {
 	sp := spinner.New()
@@ -401,7 +402,7 @@ func designModelWithTabs() Model {
 			ID:                     "D1",
 			Name:                   "Design.f3d",
 			Typename:               "DesignItem",
-			RootComponentVersionID: "CV1",
+			RootModelID: "CV1",
 		},
 		detailsCache:   map[string]*api.ItemDetails{},
 		usesCache:      map[string][]api.ComponentRef{},
@@ -456,7 +457,7 @@ func TestUpdate_TabSelect_DispatchesLoad(t *testing.T) {
 func TestUpdate_TabSelect_NoTabsAvailableIsNoop(t *testing.T) {
 	m := designModelWithTabs()
 	m.details.Typename = "BasicItem"
-	m.details.RootComponentVersionID = ""
+	m.details.RootModelID = ""
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
 	um := updated.(Model)
@@ -475,7 +476,7 @@ func TestUpdate_TabSelect_NoTabsAvailableIsNoop(t *testing.T) {
 func TestUpdate_TabSelect_DrawingItemUsesAvailable(t *testing.T) {
 	m := designModelWithTabs()
 	m.details.Typename = "DrawingItem"
-	m.details.RootComponentVersionID = ""
+	m.details.RootModelID = ""
 	m.details.ID = "di-drawing-1"
 
 	// 2 → Uses (works on drawings)
@@ -677,7 +678,7 @@ func TestUpdate_UsesLoadedMsg_PopulatesCacheAndClearsLoading(t *testing.T) {
 	m.tabLoading[tabUses] = true
 
 	items := []api.ComponentRef{{Name: "BoltA", PartNumber: "PN-1"}}
-	updated, cmd := m.Update(usesLoadedMsg{cvid: "CV1", items: items, err: nil})
+	updated, cmd := m.Update(usesLoadedMsg{modelID: "CV1", items: items, err: nil})
 	um := updated.(Model)
 	if cmd != nil {
 		t.Errorf("expected nil cmd after data arrives, got %T", cmd)
@@ -790,14 +791,14 @@ func TestUpdate_ItemClassified_ErrorDropped(t *testing.T) {
 }
 
 // TestClassifyContentsCmd_OnlyDesigns asserts that the fan-out cmd
-// skips non-designs and unclassifiable designs (no componentVersion
+// skips non-designs and unclassifiable designs (no root model
 // id). Drawings, folders, and already-classified rows must not produce
 // extra round-trips.
 func TestClassifyContentsCmd_OnlyDesigns(t *testing.T) {
 	items := []api.NavItem{
-		{ID: "d1", Kind: "design", ComponentVersionID: "cv1"},   // classify
-		{ID: "d2", Kind: "design", ComponentVersionID: ""},      // skip (no cv)
-		{ID: "d3", Kind: "design", ComponentVersionID: "cv3", Subtype: "part"}, // skip (already classified)
+		{ID: "d1", Kind: "design", RootModelID: "cv1"},   // classify
+		{ID: "d2", Kind: "design", RootModelID: ""},      // skip (no cv)
+		{ID: "d3", Kind: "design", RootModelID: "cv3", Subtype: "part"}, // skip (already classified)
 		{ID: "dw", Kind: "drawing"},                              // skip (non-design)
 		{ID: "f1", Kind: "folder", IsContainer: true},            // skip (container)
 	}
@@ -843,5 +844,143 @@ func TestSubtypeSuffix(t *testing.T) {
 				t.Errorf("subtypeSuffix(%+v) = %q, want %q", tc.item, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestComponentRefLines_TagsDrawings: v3 where-used returns drawings
+// alongside designs, so a drawing row has to say what it is.
+func TestComponentRefLines_TagsDrawings(t *testing.T) {
+	refs := []api.ComponentRef{
+		{Name: "Robot", DesignItemName: "Robot", Kind: "design"},
+		{Name: "Robot Drawing", DesignItemName: "Robot Drawing", Kind: "drawing"},
+	}
+	lines := componentRefLines(refs, 0, 0, 10, 80)
+	if len(lines) != 2 {
+		t.Fatalf("len(lines) = %d, want 2 (one per row, no \"in …\" line when names match): %q", len(lines), lines)
+	}
+	if strings.Contains(lines[0], "drawing") {
+		t.Errorf("design row should not be tagged: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "Robot Drawing") || !strings.HasSuffix(strings.TrimSpace(lines[1]), "drawing") {
+		t.Errorf("drawing row should end with the drawing tag: %q", lines[1])
+	}
+}
+
+// TestComponentRefLines_TagsRelation: Where Used rows say whether the
+// item holds the design directly or only through a sub-assembly; rows
+// with no determination (and Uses rows) carry no tag.
+func TestComponentRefLines_TagsRelation(t *testing.T) {
+	refs := []api.ComponentRef{
+		{Name: "Shock", DesignItemName: "Shock", Kind: "design", Relation: api.RelationDirect},
+		{Name: "Buggy", DesignItemName: "Buggy", Kind: "design", Relation: api.RelationIndirect, Root: true},
+		{Name: "Buggy Drawing", DesignItemName: "Buggy Drawing", Kind: "drawing", Relation: api.RelationIndirect},
+		// Untagged rows make no root claim either.
+		{Name: "Mystery", DesignItemName: "Mystery", Kind: "design", Root: true},
+	}
+	lines := componentRefLines(refs, 0, 0, 10, 80)
+	if len(lines) != 4 {
+		t.Fatalf("len(lines) = %d, want 4: %q", len(lines), lines)
+	}
+	for i, suffix := range []string{"direct", "indirect  root", "drawing  indirect", "Mystery"} {
+		if !strings.HasSuffix(strings.TrimSpace(lines[i]), suffix) {
+			t.Errorf("line %d = %q, want suffix %q", i, lines[i], suffix)
+		}
+	}
+	if strings.Contains(lines[0], "indirect") {
+		t.Errorf("direct row tagged indirect: %q", lines[0])
+	}
+}
+
+// TestUpdate_WhereUsed_RowsFirstThenTags: the rows are cached and shown
+// as soon as they arrive, with a follow-up command for the direct /
+// indirect tags; when the tagged, re-sorted rows land they replace the
+// cached ones and the cursor follows the row it was on.
+func TestUpdate_WhereUsed_RowsFirstThenTags(t *testing.T) {
+	m := designModelWithTabs()
+	m.detailsTab = tabWhereUsed
+	m.tabLoading[tabWhereUsed] = true
+
+	rows := []api.ComponentRef{
+		{ID: "top", Name: "Top", Kind: "design", RootModelID: "m-top"},
+		{ID: "mid", Name: "Mid", Kind: "design", RootModelID: "m-mid"},
+		{ID: "parent", Name: "Parent", Kind: "design", RootModelID: "m-parent"},
+	}
+	updated, cmd := m.Update(whereUsedLoadedMsg{modelID: "CV1", itemID: "D1", items: rows})
+	um := updated.(Model)
+	if um.tabLoading[tabWhereUsed] {
+		t.Error("tab still loading after the rows arrived")
+	}
+	if len(um.whereUsedCache["CV1"]) != 3 {
+		t.Fatalf("rows not cached before tags: %+v", um.whereUsedCache["CV1"])
+	}
+	if cmd == nil {
+		t.Fatal("expected a follow-up command to load the direct/indirect tags")
+	}
+
+	// Cursor on "parent" (last row); tagging moves it to the top.
+	um.tabCursors[tabWhereUsed] = 2
+	tagged := []api.ComponentRef{
+		{ID: "parent", Name: "Parent", Kind: "design", Relation: api.RelationDirect},
+		{ID: "top", Name: "Top", Kind: "design", Relation: api.RelationIndirect},
+		{ID: "mid", Name: "Mid", Kind: "design", Relation: api.RelationIndirect},
+	}
+	updated, cmd = um.Update(whereUsedRelationsMsg{modelID: "CV1", items: tagged})
+	um = updated.(Model)
+	if cmd != nil {
+		t.Errorf("expected nil cmd after tags arrive, got %T", cmd)
+	}
+	if got := um.whereUsedCache["CV1"]; got[0].ID != "parent" || got[0].Relation != api.RelationDirect {
+		t.Errorf("cache not replaced by tagged rows: %+v", got)
+	}
+	if um.tabCursors[tabWhereUsed] != 0 {
+		t.Errorf("cursor = %d, want 0 (followed \"parent\" to its new position)", um.tabCursors[tabWhereUsed])
+	}
+}
+
+// TestUpdate_WhereUsed_NoFollowUpWhenNothingToTag: rows that are all
+// drawings (already tagged from the design's drawings list) or have no
+// root model need no second request.
+func TestUpdate_WhereUsed_NoFollowUpWhenNothingToTag(t *testing.T) {
+	m := designModelWithTabs()
+	rows := []api.ComponentRef{
+		{ID: "dw", Name: "Drawing", Kind: "drawing", Relation: api.RelationDirect},
+		{ID: "cfg", Name: "Configured", Kind: "configured"},
+	}
+	_, cmd := m.Update(whereUsedLoadedMsg{modelID: "CV1", itemID: "D1", items: rows})
+	if cmd != nil {
+		t.Errorf("expected no follow-up command, got %T", cmd)
+	}
+}
+
+// TestUpdate_WhereUsedRelations_DroppedAfterCacheReset: tags that land
+// after the cache was cleared (hub switch, refresh) must not put stale
+// rows back.
+func TestUpdate_WhereUsedRelations_DroppedAfterCacheReset(t *testing.T) {
+	m := designModelWithTabs()
+	m.whereUsedCache = map[string][]api.ComponentRef{}
+	updated, _ := m.Update(whereUsedRelationsMsg{modelID: "CV1", items: []api.ComponentRef{{ID: "x", Relation: api.RelationDirect}}})
+	if _, ok := updated.(Model).whereUsedCache["CV1"]; ok {
+		t.Error("late tags re-populated a cache that had been reset")
+	}
+}
+
+// TestRefHeadLine_TagsSurviveNarrowPane: when the pane is too narrow
+// for name and tags, the name is shortened and every tag stays; the
+// line never exceeds the pane.
+func TestRefHeadLine_TagsSurviveNarrowPane(t *testing.T) {
+	line := refHeadLine("Front Suspension Assembly Long Name", []string{"indirect", "root"}, styleItemNormal, 30)
+	// Content width 30 plus the row style's one-column padding each side.
+	if w := lipgloss.Width(line); w > 32 {
+		t.Errorf("width = %d, want ≤ 32: %q", w, line)
+	}
+	if !strings.HasSuffix(line, "indirect  root") {
+		t.Errorf("tags clipped: %q", line)
+	}
+	if !strings.Contains(line, "Front") || !strings.Contains(line, "…") {
+		t.Errorf("name should be shortened with an ellipsis, not dropped: %q", line)
+	}
+	// Room for everything: nothing is shortened.
+	if got := refHeadLine("Buggy", []string{"indirect", "root"}, styleItemNormal, 80); !strings.Contains(got, "Buggy") || !strings.Contains(got, "indirect  root") || strings.Contains(got, "…") {
+		t.Errorf("unexpected shortening: %q", got)
 	}
 }

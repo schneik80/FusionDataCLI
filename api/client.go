@@ -12,9 +12,14 @@ import (
 	"time"
 )
 
-// graphqlEndpoint is a var (not const) so tests can point it at an
-// httptest.Server. Production code never reassigns it.
-var graphqlEndpoint = "https://developer.api.autodesk.com/mfg/graphql"
+// graphqlEndpoint is the Manufacturing Data Model API v3 endpoint. The
+// v2 endpoint (/mfg/graphql) still answers, but its ComponentVersion /
+// DrawingVersion types do not exist here — queries are not portable
+// between the two.
+//
+// It is a var (not const) so tests can point it at an httptest.Server.
+// Production code never reassigns it.
+var graphqlEndpoint = "https://developer.api.autodesk.com/mfg/v3/graphql/public"
 
 // region is the X-Ads-Region header value sent with every request.
 // Empty means no header is sent (defaults to US on the server side).
@@ -69,12 +74,11 @@ type NavItem struct {
 	WebURL      string // direct web URL when provided by the API
 	IsContainer bool   // true if this item can be entered (hub, project, folder)
 
-	// ComponentVersionID is the lineage id of the design's
-	// tipRootComponentVersion, captured at items-list time so the
-	// asynchronous assembly classifier can issue its occurrences probe
-	// without a second per-row round-trip. Populated only for Kind ==
-	// "design"; empty for everything else.
-	ComponentVersionID string
+	// RootModelID is the id of the design's tipRootModel, captured at
+	// items-list time so the asynchronous assembly classifier can issue
+	// its assembly-relations probe without a second per-row round-trip.
+	// Populated only for Kind == "design"; empty for everything else.
+	RootModelID string
 
 	// Subtype refines Kind for designs after classification: "assembly"
 	// when the design has at least one sub-component, "part" when it

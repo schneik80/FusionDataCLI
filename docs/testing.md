@@ -75,13 +75,13 @@ Two helpers live in `internal/testutil/`. Both auto-clean via `t.Cleanup`, so ca
 
 ```go
 srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
-    if !strings.Contains(req.Query, "occurrences(pagination") {
-        t.Errorf("query missing occurrences field: %q", req.Query)
+    if !strings.Contains(req.Query, "assemblyRelations(depth: 1, pagination") {
+        t.Errorf("query missing depth-1 assemblyRelations: %q", req.Query)
     }
     return testutil.GraphQLResponse{Data: map[string]any{
-        "componentVersion": map[string]any{
-            "occurrences": map[string]any{
-                "pagination": map[string]any{"cursor": ""},
+        "model": map[string]any{
+            "assemblyRelations": map[string]any{
+                "pagination": map[string]any{"cursor": nil},
                 "results":    []map[string]any{ /* ... */ },
             },
         },

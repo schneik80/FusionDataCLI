@@ -227,7 +227,7 @@ Document rows in the Contents column carry an inline type tag after the file nam
 | `.fsch` | schematic | `· schem` |
 | `.fprj` | ecad | `· ecad` |
 
-**Asynchronous (settled in over ~1 s after the folder lands)** — design rows pick up `· asm` or `· part` once the parallel `componentVersion.occurrences` classifier returns. See [`docs/architecture.md`](architecture.md#async-assembly-vs-part-classification) for the dispatch flow and cancellation pattern.
+**Asynchronous (settled in over ~1 s after the folder lands)** — design rows pick up `· asm` or `· part` once the parallel `model.assemblyRelations` classifier returns. See [`docs/architecture.md`](architecture.md#async-assembly-vs-part-classification) for the dispatch flow and cancellation pattern.
 
 ```
 > ▸ Designs/
@@ -246,7 +246,7 @@ Configured designs, folders, and projects never get a tag — their icon already
 
 Classification is fire-and-forget; per-row probe failures keep the row's generic design label rather than surfacing as user-visible errors. Navigating away from the folder cancels the visual effect of any still-in-flight probes via the `contentsGen` counter on the Model — late results posted after a folder change are silently dropped.
 
-Filename-extension detection is the source of truth for the Electronics types (PCB / Schematic / ECAD) and the dwg/template split. APS production blocks `__schema` introspection, so we can't enumerate the gateway's typenames; if you have an electronics item that displays as `· dwg` or no tag at all, file a bug with the file's name and the `__typename` from `debug.log` — the extension table in `api/queries.go::kindFromExtension` is the place to add a new mapping.
+Filename-extension detection is the source of truth for the Electronics types (PCB / Schematic / ECAD) and the dwg/template split. The v3 `Item` interface has only four concrete types (`BasicItem`, `ConfiguredDesignItem`, `DesignItem`, `DrawingItem`), so electronics rows have no typename of their own; if you have an electronics item that displays as `· dwg` or no tag at all, file a bug with the file's name and the `__typename` from `debug.log` — the extension table in `api/queries.go::kindFromExtension` is the place to add a new mapping.
 
 ---
 
@@ -326,19 +326,19 @@ The status bar prints the full URL as it's handed to the OS browser handler, and
 
 ```mermaid
 flowchart TD
-    A{DesignItem selected?\nDetails loaded?\nRootComponentVersionID set?} -- No --> Z[No-op with status hint:\nwait for details / not a design /\ndownload already in progress]
+    A{DesignItem selected?\nDetails loaded?\nRootModelID set?} -- No --> Z[No-op with status hint:\nwait for details / not a design /\ndownload already in progress]
     A -- Yes --> B[Set downloadInProgress = true\nstatusMsg: \"Requesting STEP translation…\"]
-    B --> C[GraphQL: componentVersion.derivatives\noutputFormat: STEP, generate: true]
+    B --> C[GraphQL: model.derivatives\ntargetFormat: STEP, generate: true]
     C --> D{Status?}
-    D -- PENDING --> E[Tea.Tick 2s, retry GraphQL]
+    D -- NOT_GENERATED / PENDING /\nIN_PROGRESS --> E[Tea.Tick 2s, retry GraphQL]
     E --> D
-    D -- FAILED --> F[Status bar: error, clear flag]
+    D -- FAILED / TIMEOUT --> F[Status bar: error, clear flag]
     D -- SUCCESS --> G[GET signedUrl (no bearer attached)\nstream to ~/Downloads/&lt;name&gt;-&lt;ts&gt;.stp]
     G --> H[Status bar: \"Saved to <path>\"]
 ```
 
 **Restrictions:**
-- Only valid on `DesignItem`. Drawings (`DrawingItem`) and configured designs (`ConfiguredDesignItem`) have no `tipRootComponentVersion`, so the API can't generate a STEP — the UI rejects the keypress with a status-bar hint.
+- Only valid on `DesignItem`. Drawings (`DrawingItem`) and configured designs (`ConfiguredDesignItem`) have no `tipRootModel`, so the API can't generate a STEP — the UI rejects the keypress with a status-bar hint.
 - A second `shift+d` while a download is in flight is rejected so polls don't pile up.
 - The destination path is `~/Downloads/<sanitised-name>-<YYYYMMDD-HHMMSS>.stp`, falling back to `os.TempDir()` if the home directory cannot be determined.
 
@@ -455,7 +455,7 @@ The details panel sits alongside the browser columns and auto-loads whenever the
 | Component (designs only) | Part number, Description, Material, Milestone flag |
 | Versions | Up to 10 most recent versions — version number, date, author, save comment |
 
-Version history is displayed newest-first. The `itemVersions` query returns them oldest-first; the UI reverses the slice.
+Version history is displayed newest-first. The v3 API has no version list or version numbers: versions are the "written" entries of the item's `history`, which arrive newest-first and are numbered from the oldest (= v1). The save comment is the history entry's description (e.g. "User Saved").
 
 ---
 
@@ -484,7 +484,7 @@ For documents the details column has a tab strip that swaps the body between fou
 
 | Item type | Tabs available | Notes |
 |---|---|---|
-| `DesignItem` (with `tipRootComponentVersion`) | Details, Uses, Where Used, Drawings | Full set |
+| `DesignItem` (with `tipRootModel`) | Details, Uses, Where Used, Drawings | Full set |
 | `DrawingItem` | Details, Uses | Uses = source design (the design the drawing was made from) |
 | `ConfiguredDesignItem` | (none — simple Details view, no strip) | The strip is hidden so the panel falls back to the basic title |
 | `BasicItem` (everything else: STEP imports, .max, .par, …) | (none) | Same as above |
@@ -494,10 +494,10 @@ For documents the details column has a tab strip that swaps the body between fou
 | Tab | Source | Cache key | API |
 |-----|--------|-----------|-----|
 | **Details** | Eagerly fetched the moment an item is selected; no extra round trip on activation | item ID | `GetItemDetails` |
-| **Uses** (DesignItem) | The immediate sub-component versions (occurrences) of the design's tip root component version | `tipRootComponentVersion.id` | `GetOccurrences` |
-| **Uses** (DrawingItem) | The source design referenced by the drawing's tip drawing version | drawing item ID | `GetDrawingSource` |
-| **Where Used** | Component versions that reference the design's tip root, deduped by parent DesignItem so each containing design appears once regardless of how many of its versions reference the component | `tipRootComponentVersion.id` | `GetWhereUsed` |
-| **Drawings** | Drawings made from any version of the design, deduped by drawing lineage URN, sorted by latest modification first | design item ID | `GetDrawingsForDesign` |
+| **Uses** (DesignItem) | The direct children (depth-1 assembly relations) of the design's tip root model, one row per instance | `tipRootModel.id` | `GetOccurrences` |
+| **Uses** (DrawingItem) | The model (and its owning design) documented by the drawing's tip drawing | drawing item ID | `GetDrawingSource` |
+| **Where Used** | Items that reference the design: parent assemblies — including ones that contain it indirectly through a sub-assembly — and drawings, which are tagged `drawing` in the row. Rows appear first; a moment later each is tagged `direct` or `indirect` and the list re-sorts direct first. A design that nothing else uses is tagged `root` | `tipRootModel.id` | `GetWhereUsed` |
+| **Drawings** | Drawing items that reference the design (`DesignItem.drawingItems`), sorted by latest modification first | design item ID | `GetDrawingsForDesign` |
 
 ### Tab cursor and Show in Location
 

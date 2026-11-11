@@ -11,20 +11,25 @@ import (
 
 func TestClassifyAssembly_Assembly(t *testing.T) {
 	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
-		if !strings.Contains(req.Query, "occurrences(pagination") {
-			t.Errorf("query missing occurrences field: %q", req.Query)
+		// depth: 1 keeps the probe to direct children; without it the
+		// API walks the whole tree to answer a yes/no question.
+		if !strings.Contains(req.Query, "assemblyRelations(depth: 1, pagination") {
+			t.Errorf("query missing depth-1 assemblyRelations: %q", req.Query)
 		}
 		if !strings.Contains(req.Query, "limit: 1") {
 			t.Errorf("query should request limit:1, got: %q", req.Query)
 		}
-		if got, _ := req.Variables["cv"].(string); got != "urn:cv:asm" {
-			t.Errorf("cv variable = %v, want urn:cv:asm", req.Variables["cv"])
+		if got, _ := req.Variables["modelId"].(string); got != "urn:model:asm" {
+			t.Errorf("modelId variable = %v, want urn:model:asm", req.Variables["modelId"])
 		}
 		return testutil.GraphQLResponse{Data: map[string]any{
-			"componentVersion": map[string]any{
-				"occurrences": map[string]any{
+			"model": map[string]any{
+				"assemblyRelations": map[string]any{
+					// limit is a page-size hint in v3: asking for 1 can
+					// return more. Any result at all means assembly.
 					"results": []map[string]any{
-						{"id": "occ-1"},
+						{"id": "rel-1"},
+						{"id": "rel-2"},
 					},
 				},
 			},
@@ -32,20 +37,20 @@ func TestClassifyAssembly_Assembly(t *testing.T) {
 	})
 	swapEndpoint(t, srv.URL)
 
-	got, err := ClassifyAssembly(context.Background(), "tok", "urn:cv:asm")
+	got, err := ClassifyAssembly(context.Background(), "tok", "urn:model:asm")
 	if err != nil {
 		t.Fatalf("ClassifyAssembly: %v", err)
 	}
 	if !got {
-		t.Errorf("expected isAssembly=true for non-empty occurrences, got false")
+		t.Errorf("expected isAssembly=true for non-empty assemblyRelations, got false")
 	}
 }
 
 func TestClassifyAssembly_Part(t *testing.T) {
 	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
 		return testutil.GraphQLResponse{Data: map[string]any{
-			"componentVersion": map[string]any{
-				"occurrences": map[string]any{
+			"model": map[string]any{
+				"assemblyRelations": map[string]any{
 					"results": []map[string]any{}, // empty = part
 				},
 			},
@@ -53,24 +58,24 @@ func TestClassifyAssembly_Part(t *testing.T) {
 	})
 	swapEndpoint(t, srv.URL)
 
-	got, err := ClassifyAssembly(context.Background(), "tok", "urn:cv:part")
+	got, err := ClassifyAssembly(context.Background(), "tok", "urn:model:part")
 	if err != nil {
 		t.Fatalf("ClassifyAssembly: %v", err)
 	}
 	if got {
-		t.Errorf("expected isAssembly=false for empty occurrences, got true")
+		t.Errorf("expected isAssembly=false for empty assemblyRelations, got true")
 	}
 }
 
-func TestClassifyAssembly_EmptyComponentVersionID(t *testing.T) {
+func TestClassifyAssembly_EmptyModelID(t *testing.T) {
 	// No GraphQL server registered — if we issued a request, it'd hit
 	// the live endpoint (or fail DNS). The empty-id check must short-circuit.
 	_, err := ClassifyAssembly(context.Background(), "tok", "")
 	if err == nil {
-		t.Errorf("expected error for empty componentVersionID, got nil")
+		t.Errorf("expected error for empty modelID, got nil")
 	}
-	if !strings.Contains(err.Error(), "empty componentVersionID") {
-		t.Errorf("error = %q, want it to mention empty componentVersionID", err.Error())
+	if !strings.Contains(err.Error(), "empty modelID") {
+		t.Errorf("error = %q, want it to mention empty modelID", err.Error())
 	}
 }
 
@@ -82,7 +87,7 @@ func TestClassifyAssembly_GraphQLError(t *testing.T) {
 	})
 	swapEndpoint(t, srv.URL)
 
-	_, err := ClassifyAssembly(context.Background(), "tok", "urn:cv:missing")
+	_, err := ClassifyAssembly(context.Background(), "tok", "urn:model:missing")
 	if err == nil {
 		t.Fatalf("expected error from GraphQL errors[], got nil")
 	}
@@ -108,7 +113,7 @@ func TestClassifyAssembly_ContextCancelledOnSemaphoreWait(t *testing.T) {
 	// Cancel synchronously so the select sees ctx.Done immediately.
 	cancel()
 
-	_, err := ClassifyAssembly(ctx, "tok", "urn:cv:any")
+	_, err := ClassifyAssembly(ctx, "tok", "urn:model:any")
 	if err == nil {
 		t.Fatalf("expected ctx cancellation error, got nil")
 	}
@@ -122,8 +127,8 @@ func TestClassifyAssembly_SemaphoreReleasesAfterCall(t *testing.T) {
 	// subsequent classifications aren't blocked indefinitely.
 	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
 		return testutil.GraphQLResponse{Data: map[string]any{
-			"componentVersion": map[string]any{
-				"occurrences": map[string]any{"results": []map[string]any{}},
+			"model": map[string]any{
+				"assemblyRelations": map[string]any{"results": []map[string]any{}},
 			},
 		}}
 	})
@@ -133,7 +138,7 @@ func TestClassifyAssembly_SemaphoreReleasesAfterCall(t *testing.T) {
 	const n = 12 // cap is 8
 	for i := 0; i < n; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		if _, err := ClassifyAssembly(ctx, "tok", "urn:cv:x"); err != nil {
+		if _, err := ClassifyAssembly(ctx, "tok", "urn:model:x"); err != nil {
 			t.Fatalf("call #%d failed: %v", i, err)
 		}
 		cancel()

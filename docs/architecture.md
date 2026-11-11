@@ -16,7 +16,7 @@ C4Context
 
     System_Ext(aps_auth, "APS Authentication v2", "OAuth 2.0 authorization server. Issues access and refresh tokens via PKCE 3-legged flow.")
 
-    System_Ext(aps_mfg, "APS Manufacturing Data Model", "GraphQL API (v2). Exposes hubs, projects, folders, items, and version history for Fusion designs.")
+    System_Ext(aps_mfg, "APS Manufacturing Data Model", "GraphQL API (v3). Exposes hubs, projects, folders, items, and version history for Fusion designs.")
 
     System_Ext(browser, "System Default Browser", "Used once during first login to complete the OAuth consent page. Not required after token is cached.")
 
@@ -54,7 +54,7 @@ C4Container
     }
 
     System_Ext(aps_auth, "APS Auth v2", "https://developer.api.autodesk.com/authentication/v2")
-    System_Ext(aps_gql, "APS MFG GraphQL v2", "https://developer.api.autodesk.com/mfg/graphql")
+    System_Ext(aps_gql, "APS MFG GraphQL v3", "https://developer.api.autodesk.com/mfg/v3/graphql/public")
     System_Ext(fusion_mcp, "Fusion MCP", "http://127.0.0.1:27182/mcp")
     SystemDb_Ext(fs, "~/.config/fusiondatacli/")
 
@@ -148,7 +148,7 @@ sequenceDiagram
     Update->>Cmd: loadItemsCmd(token, hubID, folderID)
     Cmd->>API: GetItems(ctx, token, hubID, folderID)
     Note over API: gqlQuery: up to 3 attempts<br/>retry on root-level errorType:UNKNOWN<br/>or HTTP 408/429/5xx
-    API->>APS: POST /mfg/graphql
+    API->>APS: POST /mfg/v3/graphql/public
     APS-->>API: JSON response
     API-->>Cmd: []NavItem
     Cmd-->>BT: contentsLoadedMsg{items}
@@ -187,7 +187,7 @@ See [`docs/navigation.md`](navigation.md#tab-cursor-and-show-in-location) for th
 
 ### Async assembly-vs-part classification
 
-After the Contents column loads, each DesignItem is enriched with an "assembly" / "part" subtype derived from whether its tipRootComponentVersion has any sub-component occurrences. The probe is dispatched in parallel under a `tea.Batch` and capped at 8 concurrent calls by a package-level semaphore in `api/classify.go`; each result flows back as an `itemClassifiedMsg` that mutates the matching row's `Subtype` in place. A `contentsGen` counter on the Model is incremented every time the Contents slice is replaced (folder drill, hub switch, project switch, refresh, recovery), and stale `itemClassifiedMsg`s whose gen no longer matches are dropped — late refinements can never stamp state onto a folder the user has already left.
+After the Contents column loads, each DesignItem is enriched with an "assembly" / "part" subtype derived from whether its tipRootModel has any direct assembly relations. The probe is dispatched in parallel under a `tea.Batch` and capped at 8 concurrent calls by a package-level semaphore in `api/classify.go`; each result flows back as an `itemClassifiedMsg` that mutates the matching row's `Subtype` in place. A `contentsGen` counter on the Model is incremented every time the Contents slice is replaced (folder drill, hub switch, project switch, refresh, recovery), and stale `itemClassifiedMsg`s whose gen no longer matches are dropped — late refinements can never stamp state onto a folder the user has already left.
 
 ```mermaid
 sequenceDiagram
@@ -201,7 +201,7 @@ sequenceDiagram
     par 8 concurrent
         Batch->>Sem: classifySem <- {}
         Sem-->>Batch: slot acquired
-        Batch->>APS: componentVersion(cvid).occurrences(limit:1)
+        Batch->>APS: model(modelId).assemblyRelations(depth:1, limit:1)
         APS-->>Batch: { results: [] | [{...}] }
         Batch-->>Update: itemClassifiedMsg{gen, itemID, isAssembly}
     end
@@ -227,7 +227,7 @@ The browser View() runs at spinner rate (~10 Hz) and re-renders every visible ro
 
 ## Resilience — APS gateway flakiness
 
-The APS Manufacturing Data Model GraphQL gateway (`/mfg/graphql`) intermittently returns `code:NOT_FOUND, errorType:UNKNOWN` for hub URNs it just successfully enumerated via the `hubs` query — the same access token, same hub ID, and same query body succeed and fail within seconds. The failure can occur on the very first paginated request (no cursor involved), so it is not a cursor-encoding issue, and reproduces against both the shared `*http.Client` and `http.DefaultClient`, so it is not a connection-state issue.
+The APS Manufacturing Data Model GraphQL gateway (observed on the v2 endpoint; the retry is kept on v3) intermittently returns `code:NOT_FOUND, errorType:UNKNOWN` for hub URNs it just successfully enumerated via the `hubs` query — the same access token, same hub ID, and same query body succeed and fail within seconds. The failure can occur on the very first paginated request (no cursor involved), so it is not a cursor-encoding issue, and reproduces against both the shared `*http.Client` and `http.DefaultClient`, so it is not a connection-state issue.
 
 `gqlQuery` (in `api/client.go`) wraps a single-shot `gqlQueryOnce` in a 3-attempt retry loop with backoffs `0 → 500 ms → 1.5 s`. Retry triggers are narrow:
 
@@ -267,12 +267,12 @@ FusionDataCLI/
 │   └── tokens.go            LoadTokens(), SaveTokens(), TokenData.Valid()
 │
 ├── api/
-│   ├── client.go            gqlQuery() retry loop + gqlQueryOnce(), NavItem (incl. ComponentVersionID
+│   ├── client.go            gqlQuery() retry loop + gqlQueryOnce(), NavItem (incl. RootModelID
 │   │                        + Subtype), SetRegion(), SetGraphqlEndpointForTesting()
 │   ├── queries.go           Hierarchy queries — GetHubs/Projects/Folders/Items; allPages() pagination;
-│   │                        items queries pull tipRootComponentVersion.id inline for designs so the
-│   │                        async classifier can probe occurrences without a second round-trip
-│   ├── classify.go          ClassifyAssembly(cvid) + classifySem semaphore (cap 8 concurrent)
+│   │                        items queries pull tipRootModel.id inline for designs so the
+│   │                        async classifier can probe relations without a second round-trip
+│   ├── classify.go          ClassifyAssembly(modelID) + classifySem semaphore (cap 8 concurrent)
 │   ├── details.go           GetItemDetails(), ItemDetails, VersionSummary, parseTime()
 │   ├── refs.go              Cross-reference queries: GetOccurrences, GetWhereUsed,
 │   │                        GetDrawingsForDesign, GetDrawingSource (Uses/WhereUsed/Drawings tabs)
@@ -297,9 +297,9 @@ FusionDataCLI/
 │   └── styles.go            colorTheme, themes[], applyTheme(), cycleTheme(), tab strip styles
 │
 ├── cmd/
-│   ├── probe-assembly/      One-shot diagnostic — runs the extended itemsByProject query against a
-│   │                        live hub and prints assembly/part distribution. Used to validate the
-│   │                        classifier schema and per-row cost. Safe to delete after decisions land.
+│   ├── probe-gql/           Diagnostic — sends one GraphQL document (or a type/root introspection)
+│   │                        to the v3 or v2 endpoint with the cached login and prints the raw
+│   │                        response. Used to answer schema questions against the live gateway.
 │   └── screenshot/          Generates the README screenshot from a scripted Model state
 │
 ├── internal/testutil/       Shared test fakes — GraphQLServer, NewMCPServer

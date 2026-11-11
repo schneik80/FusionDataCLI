@@ -74,32 +74,49 @@ func TestSanitizeFilename(t *testing.T) {
 }
 
 func TestRequestSTEPDerivative_Statuses(t *testing.T) {
+	const signed = "https://signed.example/file.stp"
 	cases := []struct {
-		name   string
-		status string
-		want   string
+		name    string
+		status  string
+		want    string
+		wantURL string
 	}{
-		{name: "pending", status: "PENDING", want: "PENDING"},
-		{name: "success", status: "SUCCESS", want: "SUCCESS"},
-		{name: "failed", status: "FAILED", want: "FAILED"},
+		{name: "success", status: "SUCCESS", want: StepStatusSuccess, wantURL: signed},
+		{name: "failed", status: "FAILED", want: StepStatusFailed},
+		// TIMEOUT is terminal: polling on would never finish.
+		{name: "timeout is a failure", status: "TIMEOUT", want: StepStatusFailed},
+		// Everything the API reports while it works collapses to PENDING
+		// so the UI keeps polling.
+		{name: "pending", status: "PENDING", want: StepStatusPending},
+		{name: "not generated yet", status: "NOT_GENERATED", want: StepStatusPending},
+		{name: "in progress", status: "IN_PROGRESS", want: StepStatusPending},
+		{name: "unknown future status keeps polling", status: "QUEUED", want: StepStatusPending},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var sawCV bool
+			var sawModel bool
 			status := tc.status
 			srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
-				if v, ok := req.Variables["componentVersionId"].(string); ok && v == "cv-1" {
-					sawCV = true
+				if v, ok := req.Variables["modelId"].(string); ok && v == "m-1" {
+					sawModel = true
 				} else {
-					t.Errorf("Variables[componentVersionId] = %v, want \"cv-1\"", req.Variables["componentVersionId"])
+					t.Errorf("Variables[modelId] = %v, want \"m-1\"", req.Variables["modelId"])
+				}
+				if !strings.Contains(req.Query, "targetFormat: [STEP]") {
+					t.Errorf("query should request targetFormat: [STEP], got %q", req.Query)
+				}
+				// The signed URL is only present once generation is done.
+				var url any
+				if status == "SUCCESS" {
+					url = signed
 				}
 				return testutil.GraphQLResponse{Data: map[string]any{
-					"componentVersion": map[string]any{
+					"model": map[string]any{
 						"derivatives": []any{
 							map[string]any{
 								"status":       status,
-								"signedUrl":    "https://signed.example/file.stp",
+								"signedUrl":    url,
 								"outputFormat": "STEP",
 							},
 						},
@@ -108,18 +125,18 @@ func TestRequestSTEPDerivative_Statuses(t *testing.T) {
 			})
 			swapEndpoint(t, srv.URL)
 
-			gotStatus, gotURL, err := RequestSTEPDerivative(context.Background(), "tok", "cv-1")
+			gotStatus, gotURL, err := RequestSTEPDerivative(context.Background(), "tok", "m-1")
 			if err != nil {
 				t.Fatalf("RequestSTEPDerivative: %v", err)
 			}
-			if !sawCV {
-				t.Errorf("handler did not see componentVersionId variable")
+			if !sawModel {
+				t.Errorf("handler did not see modelId variable")
 			}
 			if gotStatus != tc.want {
 				t.Errorf("status = %q, want %q", gotStatus, tc.want)
 			}
-			if gotURL != "https://signed.example/file.stp" {
-				t.Errorf("signedURL = %q, want %q", gotURL, "https://signed.example/file.stp")
+			if gotURL != tc.wantURL {
+				t.Errorf("signedURL = %q, want %q", gotURL, tc.wantURL)
 			}
 		})
 	}
@@ -128,14 +145,14 @@ func TestRequestSTEPDerivative_Statuses(t *testing.T) {
 func TestRequestSTEPDerivative_NoDerivative(t *testing.T) {
 	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
 		return testutil.GraphQLResponse{Data: map[string]any{
-			"componentVersion": map[string]any{
+			"model": map[string]any{
 				"derivatives": []any{},
 			},
 		}}
 	})
 	swapEndpoint(t, srv.URL)
 
-	_, _, err := RequestSTEPDerivative(context.Background(), "tok", "cv-1")
+	_, _, err := RequestSTEPDerivative(context.Background(), "tok", "m-1")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -246,7 +263,10 @@ func TestStepDownloadPath_Sanitizes(t *testing.T) {
 			userHomeDir = tc.homeFn
 			got := StepDownloadPath(tc.input)
 			if tc.fallbackTemp {
-				wantPrefix := os.TempDir() + string(os.PathSeparator)
+				// os.TempDir() ends in a separator on macOS ($TMPDIR) and
+				// not on Linux; filepath.Join in the code under test
+				// cleans it either way.
+				wantPrefix := filepath.Clean(os.TempDir()) + string(os.PathSeparator)
 				wantSuffix := "-20300102-150405.stp"
 				if !strings.HasPrefix(got, wantPrefix) {
 					t.Errorf("StepDownloadPath(%q) = %q, want prefix %q", tc.input, got, wantPrefix)
