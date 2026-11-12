@@ -6,7 +6,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/schneik80/FusionDataCLI/internal/testutil"
 )
@@ -647,5 +649,116 @@ func TestGetWhereUsed_BatchesRelationChecks(t *testing.T) {
 	}
 	if r := whereUsedRows(got); r != "b=direct,a=indirect,c=indirect" {
 		t.Errorf("rows = %s", r)
+	}
+}
+
+// relationServer answers a where-used list of three parents and hands
+// every WhereUsedIsDirect request to relations.
+func relationServer(t *testing.T, relations func(req testutil.GraphQLRequest) testutil.GraphQLResponse) {
+	t.Helper()
+	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
+		if strings.Contains(req.Query, "whereUsed(") {
+			var results []map[string]any
+			for _, id := range []string{"a", "b", "c"} {
+				results = append(results, map[string]any{"__typename": "DesignItem", "id": id, "name": id,
+					"tipRootModel": map[string]any{"id": "m-" + id}})
+			}
+			return testutil.GraphQLResponse{Data: map[string]any{"item": map[string]any{"whereUsed": map[string]any{
+				"pagination": map[string]any{"cursor": nil}, "results": results,
+			}}}}
+		}
+		return relations(req)
+	})
+	swapEndpoint(t, srv.URL)
+}
+
+// TestGetWhereUsedRelations_UnreadableParentCostsNoExtraRequests: a
+// document with damaged data answers DATA_HAS_ERROR on its references —
+// labelled UNKNOWN, at a shallow path, the shape of flakiness — beside
+// the other parents' answers. That used to be retried three times and
+// then asked again one parent at a time: 3 + 3 requests here, 3 + 25
+// for a full batch. It is one request; the damaged parent alone stays
+// untagged.
+func TestGetWhereUsedRelations_UnreadableParentCostsNoExtraRequests(t *testing.T) {
+	fakeQuota(t)
+	var relationRequests int
+	relationServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
+		relationRequests++
+		return testutil.GraphQLResponse{RawBody: `{"data":{
+			"p0":{"assemblyRelations":{"pagination":{"cursor":null},"results":[{"toModel":{"designItem":{"id":"I1"}}}]}},
+			"p1":{"assemblyRelations":null},
+			"p2":{"assemblyRelations":{"pagination":{"cursor":null},"results":[{"toModel":{"designItem":{"id":"other"}}}]}}},
+			"errors":[{"message":"DATA_LOSS: Data has error (file save snapshot)","path":["p1","assemblyRelations"],"extensions":{"code":"DATA_HAS_ERROR","errorType":"UNKNOWN","service":"mfgdm-core"}}]}`}
+	})
+
+	rows, err := GetWhereUsed(context.Background(), "tok", "H1", "I1")
+	if err != nil {
+		t.Fatalf("GetWhereUsed: %v", err)
+	}
+	got := GetWhereUsedRelations(context.Background(), "tok", "I1", rows)
+	if relationRequests != 1 {
+		t.Errorf("relation requests = %d, want 1", relationRequests)
+	}
+	if r := whereUsedRows(got); r != "a=direct,b=,c=indirect" {
+		t.Errorf("rows = %s, want a=direct,b=,c=indirect", r)
+	}
+}
+
+// TestGetWhereUsedRelations_FlakyBatchIsNotSplit: a batch that kept
+// failing transiently is not asked again parent by parent — that would
+// be the same failure once more for each of them.
+func TestGetWhereUsedRelations_FlakyBatchIsNotSplit(t *testing.T) {
+	fakeQuota(t)
+	prev := retryBackoffs
+	retryBackoffs = []time.Duration{0, 0, 0}
+	t.Cleanup(func() { retryBackoffs = prev })
+	var relationRequests int
+	relationServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
+		relationRequests++
+		return testutil.GraphQLResponse{RawBody: `{"data":null,"errors":[{"message":"Unknown Internal Server Error","extensions":{"errorType":"UNKNOWN"}}]}`}
+	})
+
+	rows, err := GetWhereUsed(context.Background(), "tok", "H1", "I1")
+	if err != nil {
+		t.Fatalf("GetWhereUsed: %v", err)
+	}
+	got := GetWhereUsedRelations(context.Background(), "tok", "I1", rows)
+	if relationRequests != len(retryBackoffs) {
+		t.Errorf("relation requests = %d, want %d (one batch, retried; no per-parent requests)", relationRequests, len(retryBackoffs))
+	}
+	for _, r := range got {
+		if r.Relation != "" {
+			t.Errorf("%s tagged %q after a failed check, want untagged", r.Name, r.Relation)
+		}
+	}
+}
+
+// TestGetWhereUsedRelations_RefusedBatchIsAskedPerParent: a refusal is
+// an answer about one parent (a model that no longer resolves nulls its
+// root field), so the others are still asked for, one at a time.
+func TestGetWhereUsedRelations_RefusedBatchIsAskedPerParent(t *testing.T) {
+	fakeQuota(t)
+	var relationRequests atomic.Int32
+	relationServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
+		relationRequests.Add(1)
+		if len(req.Variables) > 1 || req.Variables["m0"] == "m-b" {
+			return testutil.GraphQLResponse{RawBody: `{"data":{"p0":null},"errors":[{"message":"Model not found","path":["p0"],"extensions":{"code":"NOT_FOUND"}}]}`}
+		}
+		return testutil.GraphQLResponse{Data: map[string]any{"p0": map[string]any{"assemblyRelations": map[string]any{
+			"pagination": map[string]any{"cursor": nil},
+			"results":    []map[string]any{{"toModel": map[string]any{"designItem": map[string]any{"id": "I1"}}}},
+		}}}}
+	})
+
+	rows, err := GetWhereUsed(context.Background(), "tok", "H1", "I1")
+	if err != nil {
+		t.Fatalf("GetWhereUsed: %v", err)
+	}
+	got := GetWhereUsedRelations(context.Background(), "tok", "I1", rows)
+	if relationRequests.Load() != 4 {
+		t.Errorf("relation requests = %d, want 4 (the batch, then each of three parents)", relationRequests.Load())
+	}
+	if r := whereUsedRows(got); r != "a=direct,c=direct,b=" {
+		t.Errorf("rows = %s, want a=direct,c=direct,b=", r)
 	}
 }

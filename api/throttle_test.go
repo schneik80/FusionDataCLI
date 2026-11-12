@@ -224,3 +224,93 @@ func TestGqlQuery_DeterministicRootErrorIsNotRetried(t *testing.T) {
 		t.Errorf("a refusal must not be reported as flakiness: %v", err)
 	}
 }
+
+const pricedQuery = "query GetProjects($hubId: ID!) { hub(hubId: $hubId) { projects { results { id } } } }"
+
+// TestCostEstimate: a query is priced from the table until the API has
+// answered that text once, and by the API's own number from then on.
+func TestCostEstimate(t *testing.T) {
+	b := &costBook{learned: map[string]int{}}
+	cases := map[string]int{
+		pricedQuery: 316,
+		"query ClassifyContents($id: ID!) { list: itemsByProject(projectId: $id, pagination: { limit: 20 }) { results { id } } }": 11 + 11*20,
+		"query WhereUsedIsDirect($m0: ID!, $m1: ID!) { p0: model(modelId: $m0) { id } p1: model(modelId: $m1) { id } }":           24,
+		"query NeverSeen { x }": unknownOpCost,
+		"{ x }":                 unknownOpCost,
+	}
+	for q, want := range cases {
+		if got := b.estimate(q); got != want {
+			t.Errorf("estimate(%q) = %d, want %d", q, got, want)
+		}
+	}
+	b.observe(pricedQuery, 266)
+	b.observe(pricedQuery, 0) // an answer without a price changes nothing
+	if got := b.estimate(pricedQuery); got != 266 {
+		t.Errorf("estimate after an observation = %d, want 266", got)
+	}
+}
+
+// TestForegroundWaitsForPoints: a request that would take the minute's
+// spending past PointBudget is held until enough of it has aged out,
+// instead of being sent into an HTTP 429 — and the header can say so.
+func TestForegroundWaitsForPoints(t *testing.T) {
+	q, sleeps := fakeQuota(t)
+	calls := serve(t, func(_ int32, w http.ResponseWriter) {
+		_, _ = io.WriteString(w, `{"data":{"x":1},"extensions":{"pointValue":{"requestedQueryPointValue":316}}}`)
+	})
+	q.spent(PointBudget - 400) // 400 left
+	now := q.now()
+	q.now = func() time.Time { return now.Add(20 * time.Second) }
+	q.spent(300) // 100 left: the 316-point request does not fit
+	base := q.now()
+	var slept time.Duration
+	inner := q.sleep
+	q.sleep = func(ctx context.Context, d time.Duration) error {
+		if _, held, _ := Quota(); held != d {
+			t.Errorf("Quota() reports a hold of %s while waiting %s", held, d)
+		}
+		slept += d
+		return inner(ctx, d)
+	}
+	q.now = func() time.Time { return base.Add(slept) }
+
+	if _, err := gqlQuery(context.Background(), "tok", pricedQuery, nil); err != nil {
+		t.Fatalf("gqlQuery: %v", err)
+	}
+	// The first spend ages out 40 s from now; that frees enough.
+	if len(*sleeps) != 1 || (*sleeps)[0] != 40*time.Second || calls.Load() != 1 {
+		t.Errorf("sleeps = %v calls = %d, want one 40s wait and one call", *sleeps, calls.Load())
+	}
+	if points, held, _ := Quota(); points != 616 || held != 0 {
+		t.Errorf("Quota() = %d points, held %s; want 616, 0", points, held)
+	}
+}
+
+// TestAdmitReservesAndSettles: an admitted request counts against the
+// budget before its answer arrives, at its estimate, and at what the
+// API charged afterwards — nothing, for a request that was refused.
+func TestAdmitReservesAndSettles(t *testing.T) {
+	q, sleeps := fakeQuota(t)
+	ctx := context.Background()
+	r1, err := q.admit(ctx, 600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if points, _, _ := Quota(); points != 600 {
+		t.Errorf("reserved = %d, want 600", points)
+	}
+	q.settle(r1, 450)
+	r2, _ := q.admit(ctx, 300)
+	q.settle(r2, 0)
+	if points, _, _ := Quota(); points != 450 {
+		t.Errorf("after settling = %d, want 450", points)
+	}
+	// A request dearer than the whole budget goes once nothing else is
+	// in the window, and otherwise waits for that.
+	if _, err := q.admit(ctx, PointBudget+1); err != nil {
+		t.Fatal(err)
+	}
+	if len(*sleeps) != 1 || (*sleeps)[0] != time.Minute {
+		t.Errorf("sleeps = %v, want one 1m wait", *sleeps)
+	}
+}

@@ -318,6 +318,10 @@ type Model struct {
 	// coming back to a folder costs nothing.
 	classCache map[string]api.Classification
 
+	// listings serves a project list or a container's contents again
+	// for a short while without asking the API (see listings.go).
+	listings *listingCache
+
 	// For column 2: when drilling into a subfolder, track the stack so we can go back.
 	folderStack []breadcrumbEntry
 
@@ -444,6 +448,7 @@ func New(cfg *config.Config, cfgErr error, version string) Model {
 			pins:           loadedPins,
 			detailsCache:   make(map[string]*api.ItemDetails),
 			classCache:     make(map[string]api.Classification),
+			listings:       newListingCache(),
 			usesCache:      make(map[string][]api.ComponentRef),
 			whereUsedCache: make(map[string][]api.ComponentRef),
 			drawingsCache:  make(map[string][]api.DrawingRef),
@@ -461,6 +466,7 @@ func New(cfg *config.Config, cfgErr error, version string) Model {
 		pins:           loadedPins,
 		detailsCache:   make(map[string]*api.ItemDetails),
 		classCache:     make(map[string]api.Classification),
+		listings:       newListingCache(),
 		usesCache:      make(map[string][]api.ComponentRef),
 		whereUsedCache: make(map[string][]api.ComponentRef),
 		drawingsCache:  make(map[string][]api.DrawingRef),
@@ -534,14 +540,18 @@ func loadHubsCmd(token string) tea.Cmd {
 	}
 }
 
-func loadProjectsCmd(token, hubID string) tea.Cmd {
+func loadProjectsCmd(cache *listingCache, token, hubID string) tea.Cmd {
 	return func() tea.Msg {
+		if items, ok := cache.get("projects:" + hubID); ok {
+			return projectsLoadedMsg{items}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
 		defer cancel()
 		items, err := api.GetProjects(ctx, token, hubID)
 		if err != nil {
 			return errMsg{err}
 		}
+		cache.put("projects:"+hubID, items)
 		return projectsLoadedMsg{items}
 	}
 }
@@ -549,8 +559,11 @@ func loadProjectsCmd(token, hubID string) tea.Cmd {
 // loadProjectContentsCmd loads the root contents of a project.
 // It fetches both top-level folders (foldersByProject) and project-level items
 // (itemsByProject) concurrently and merges them — folders first, then items.
-func loadProjectContentsCmd(token, projectID string) tea.Cmd {
+func loadProjectContentsCmd(cache *listingCache, token, projectID string) tea.Cmd {
 	return func() tea.Msg {
+		if items, ok := cache.get("project:" + projectID); ok {
+			return contentsLoadedMsg{items: items, containerID: projectID, isProject: true}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
 		defer cancel()
 
@@ -576,12 +589,16 @@ func loadProjectContentsCmd(token, projectID string) tea.Cmd {
 			return errMsg{iErr}
 		}
 		combined := append(folders, items...)
+		cache.put("project:"+projectID, combined)
 		return contentsLoadedMsg{items: combined, containerID: projectID, isProject: true}
 	}
 }
 
-func loadItemsCmd(token, hubID, folderID string) tea.Cmd {
+func loadItemsCmd(cache *listingCache, token, hubID, folderID string) tea.Cmd {
 	return func() tea.Msg {
+		if items, ok := cache.get("folder:" + hubID + ":" + folderID); ok {
+			return contentsLoadedMsg{items: items, containerID: folderID}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
 		defer cancel()
 
@@ -609,7 +626,9 @@ func loadItemsCmd(token, hubID, folderID string) tea.Cmd {
 		if iErr != nil {
 			return errMsg{iErr}
 		}
-		return contentsLoadedMsg{items: append(folders, items...), containerID: folderID}
+		combined := append(folders, items...)
+		cache.put("folder:"+hubID+":"+folderID, combined)
+		return contentsLoadedMsg{items: combined, containerID: folderID}
 	}
 }
 
@@ -965,7 +984,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedHubNameCache = msg.items[0].Name
 			m.loading[colProjects] = true
 			m.loadPinsForCurrentHub()
-			return m, loadProjectsCmd(m.token, msg.items[0].ID)
+			return m, loadProjectsCmd(m.listings, m.token, msg.items[0].ID)
 		}
 		m.state = stateHubSelect
 		m.activeCol = colProjects
@@ -1055,7 +1074,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Skip classification on intermediate hops:
 						// these items are about to be replaced by the
 						// next folder's contents anyway.
-						return m, loadItemsCmd(m.token, m.selectedHubID, target.ID)
+						return m, loadItemsCmd(m.listings, m.token, m.selectedHubID, target.ID)
 					}
 				}
 				// Folder chain broken (could happen if APS returned a
@@ -1818,7 +1837,7 @@ func (m Model) clickBreadcrumb(h crumbHit) (Model, tea.Cmd) {
 		m.loading[colContents] = true
 		m.details = nil
 		m.detailsScroll = 0
-		return m, loadProjectContentsCmd(m.token, proj.ID)
+		return m, loadProjectContentsCmd(m.listings, m.token, proj.ID)
 
 	case "folder":
 		if h.index < 0 || h.index >= len(m.folderStack) {
@@ -1832,7 +1851,7 @@ func (m Model) clickBreadcrumb(h crumbHit) (Model, tea.Cmd) {
 		m.loading[colContents] = true
 		m.details = nil
 		m.detailsScroll = 0
-		return m, loadItemsCmd(m.token, m.selectedHubID, target.id)
+		return m, loadItemsCmd(m.listings, m.token, m.selectedHubID, target.id)
 	}
 	return m, nil
 }
@@ -1849,12 +1868,12 @@ func (m Model) navigateLeft() (Model, tea.Cmd) {
 			m.loading[colContents] = true
 			if len(m.folderStack) > 0 {
 				// Reload the folder that's now on top of the stack.
-				return m, loadItemsCmd(m.token, m.selectedHubID, m.folderStack[len(m.folderStack)-1].id)
+				return m, loadItemsCmd(m.listings, m.token, m.selectedHubID, m.folderStack[len(m.folderStack)-1].id)
 			}
 			// Back to project root folders.
 			proj := m.selectedItem(colProjects)
 			if proj != nil {
-				return m, loadProjectContentsCmd(m.token, proj.ID)
+				return m, loadProjectContentsCmd(m.listings, m.token, proj.ID)
 			}
 			m.loading[colContents] = false
 		} else {
@@ -1879,7 +1898,7 @@ func (m Model) navigateRight() (Model, tea.Cmd) {
 		m.cols[colContents] = nil
 		m.folderStack = nil
 		m.loading[colContents] = true
-		return m, loadProjectContentsCmd(m.token, item.ID)
+		return m, loadProjectContentsCmd(m.listings, m.token, item.ID)
 
 	case colContents:
 		item := m.selectedItem(colContents)
@@ -1891,7 +1910,7 @@ func (m Model) navigateRight() (Model, tea.Cmd) {
 			m.folderStack = append(m.folderStack, breadcrumbEntry{id: item.ID, name: item.Name})
 			m.cols[colContents] = nil
 			m.loading[colContents] = true
-			return m, loadItemsCmd(m.token, m.selectedHubID, item.ID)
+			return m, loadItemsCmd(m.listings, m.token, m.selectedHubID, item.ID)
 		}
 		// Non-container: details already visible, no-op for right arrow.
 	}
@@ -2121,7 +2140,7 @@ func (m Model) handleItemLocation(msg itemLocationLoadedMsg) (Model, tea.Cmd) {
 	// the existing details auto-load instead of staying on a tab whose
 	// list is about to become stale anyway.
 	m.detailsTab = tabDetails
-	return m, loadProjectContentsCmd(m.token, loc.ProjectID)
+	return m, loadProjectContentsCmd(m.listings, m.token, loc.ProjectID)
 }
 
 // maybeLoadActiveTab returns a fetch command for the active tab if its
@@ -2415,6 +2434,7 @@ func (m Model) refresh() (Model, tea.Cmd) {
 	m.usesCache = make(map[string][]api.ComponentRef)
 	m.whereUsedCache = make(map[string][]api.ComponentRef)
 	m.drawingsCache = make(map[string][]api.DrawingRef)
+	m.listings.clear()
 	m.detailsTab = tabDetails
 	m.resetTabState()
 	m.pendingNav = nil
@@ -2425,7 +2445,7 @@ func (m Model) refresh() (Model, tea.Cmd) {
 		}
 		m.cols[colProjects] = nil
 		m.loading[colProjects] = true
-		return m, loadProjectsCmd(m.token, m.selectedHubID)
+		return m, loadProjectsCmd(m.listings, m.token, m.selectedHubID)
 
 	case colContents:
 		if len(m.folderStack) > 0 {
@@ -2433,7 +2453,7 @@ func (m Model) refresh() (Model, tea.Cmd) {
 			entry := m.folderStack[len(m.folderStack)-1]
 			m.cols[colContents] = nil
 			m.loading[colContents] = true
-			return m, loadItemsCmd(m.token, m.selectedHubID, entry.id)
+			return m, loadItemsCmd(m.listings, m.token, m.selectedHubID, entry.id)
 		}
 		proj := m.selectedItem(colProjects)
 		if proj == nil {
@@ -2441,7 +2461,7 @@ func (m Model) refresh() (Model, tea.Cmd) {
 		}
 		m.cols[colContents] = nil
 		m.loading[colContents] = true
-		return m, loadProjectContentsCmd(m.token, proj.ID)
+		return m, loadProjectContentsCmd(m.listings, m.token, proj.ID)
 	}
 	return m, nil
 }
@@ -2473,7 +2493,7 @@ func (m Model) selectHub() (Model, tea.Cmd) {
 	m.usesCache = make(map[string][]api.ComponentRef)
 	m.whereUsedCache = make(map[string][]api.ComponentRef)
 	m.drawingsCache = make(map[string][]api.DrawingRef)
-	return m, loadProjectsCmd(m.token, hub.ID)
+	return m, loadProjectsCmd(m.listings, m.token, hub.ID)
 }
 
 // adjustHubScroll keeps the hub cursor visible in the overlay.
@@ -2607,7 +2627,7 @@ func (m Model) navigateToPinnedProject(p pins.Pin) (Model, tea.Cmd) {
 			m.details = nil
 			m.detailsScroll = 0
 			m.detailsTab = tabDetails
-			return m, loadProjectContentsCmd(m.token, proj.ID)
+			return m, loadProjectContentsCmd(m.listings, m.token, proj.ID)
 		}
 	}
 	m.statusMsg = "Project not in current hub: " + p.Name
@@ -2651,7 +2671,7 @@ func (m Model) navigateToPinnedFolder(p pins.Pin) (Model, tea.Cmd) {
 		folderRefs[i] = api.FolderRef{ID: f.ID, Name: f.Name}
 	}
 	m.pendingNav = &pendingNavState{folders: folderRefs}
-	return m, loadProjectContentsCmd(m.token, proj.ID)
+	return m, loadProjectContentsCmd(m.listings, m.token, proj.ID)
 }
 
 // selectedItem returns a pointer to the item at the cursor in a given column, or nil.

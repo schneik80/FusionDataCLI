@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -482,7 +483,7 @@ const relationPageSize = 250
 
 // relationCheckConcurrency caps the direct/indirect requests a single
 // Where Used load has in flight (only reached past 25 parents, or when
-// a batch has to be retried one parent at a time).
+// a refused batch is asked again one parent at a time).
 const relationCheckConcurrency = 4
 
 // maxRelationPages bounds the walk through one parent's references
@@ -498,6 +499,7 @@ type relationCheck struct {
 	cursor  string // next page of its relations; empty on the first
 	seen    int    // references read so far, across pages
 	rel     string // RelationDirect / RelationIndirect / relationNone once decided
+	failed  bool   // its references could not be read
 }
 
 // relationNone is the internal verdict for a parent whose current
@@ -545,27 +547,37 @@ func directRelations(ctx context.Context, token, itemID string, models map[int]s
 			defer func() { <-sem }()
 			return relationBatch(ctx, token, itemID, batch)
 		}
-		failed := make([]bool, len(pending))
 		for start := 0; start < len(pending); start += relationBatchSize {
 			end := min(start+relationBatchSize, len(pending))
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				if run(pending[start:end]) == nil {
+				batch := pending[start:end]
+				err := run(batch)
+				if err == nil {
 					return
 				}
-				// One unreadable parent spoils the whole request. Ask
-				// again one at a time so the others still get an answer.
-				var inner sync.WaitGroup
-				for i := start; i < end; i++ {
-					if end-start == 1 {
-						failed[i] = true
-						break
+				// The request as a whole failed. Only a refusal is worth
+				// asking again parent by parent: it is an answer about
+				// one of them (a model that no longer resolves nulls its
+				// root field), and the others can still be read. A
+				// request that timed out, was throttled to the end or
+				// kept failing transiently would fail the same way 25
+				// more times.
+				if len(batch) == 1 || ctx.Err() != nil || errors.Is(err, ErrFlaky) || errors.Is(err, ErrThrottled) {
+					for _, c := range batch {
+						c.failed = true
 					}
+					return
+				}
+				var inner sync.WaitGroup
+				for _, c := range batch {
 					inner.Add(1)
 					go func() {
 						defer inner.Done()
-						failed[i] = run(pending[i:i+1]) != nil
+						if run([]*relationCheck{c}) != nil {
+							c.failed = true
+						}
 					}()
 				}
 				inner.Wait()
@@ -574,9 +586,9 @@ func directRelations(ctx context.Context, token, itemID string, models map[int]s
 		wg.Wait()
 
 		var next []*relationCheck
-		for i, c := range pending {
+		for _, c := range pending {
 			switch {
-			case failed[i]:
+			case c.failed:
 			case c.rel != "":
 				out[c.key] = c.rel
 			default:
@@ -591,7 +603,9 @@ func directRelations(ctx context.Context, token, itemID string, models map[int]s
 // relationBatch runs one request covering every check in batch and
 // advances each: rel is set once the item is found (direct) or the
 // parent's references run out (indirect); otherwise cursor moves on.
-// On error no check is modified.
+// A parent the API returns no references for — a document with damaged
+// data answers DATA_HAS_ERROR there, beside the others' answers — is
+// marked failed, alone. On error no check is modified.
 func relationBatch(ctx context.Context, token, itemID string, batch []*relationCheck) error {
 	var decl, sel []string
 	vars := make(map[string]any, 2*len(batch))
@@ -635,14 +649,13 @@ func relationBatch(ctx context.Context, token, itemID string, batch []*relationC
 	if err := json.Unmarshal(data, &r); err != nil {
 		return fmt.Errorf("where-used relation decode: %w", err)
 	}
-	// Validate before touching any check, so an error leaves them as-is.
-	for i := range batch {
-		if m := r[fmt.Sprintf("p%d", i)]; m == nil || m.AssemblyRelations == nil {
-			return fmt.Errorf("where-used relation: no relations returned for parent %d", i)
-		}
-	}
 	for i, c := range batch {
-		ar := r[fmt.Sprintf("p%d", i)].AssemblyRelations
+		m := r[fmt.Sprintf("p%d", i)]
+		if m == nil || m.AssemblyRelations == nil {
+			c.failed = true
+			continue
+		}
+		ar := m.AssemblyRelations
 		c.cursor = ar.Pagination.Cursor
 		c.seen += len(ar.Results)
 		if c.cursor == "" {

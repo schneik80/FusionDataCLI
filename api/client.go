@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -146,6 +147,7 @@ type result struct {
 	data       json.RawMessage
 	err        error
 	retryAfter time.Duration
+	points     int // what the API charged, when it said
 }
 
 func gqlQuery(ctx context.Context, token, q string, vars map[string]any) (json.RawMessage, error) {
@@ -163,9 +165,10 @@ func gqlQuery(ctx context.Context, token, q string, vars map[string]any) (json.R
 				return nil, err
 			}
 		}
-		// Hold while the API is throttling us, and hold background work
-		// while the minute's points are mostly spent.
-		if err := quota.wait(ctx); err != nil {
+		// Hold while the API is throttling us, and while the request
+		// would not fit in what is left of the minute's points.
+		reserved, err := quota.admit(ctx, costs.estimate(q))
+		if err != nil {
 			if throttles > 0 {
 				return nil, fmt.Errorf("%w (%v)", ErrThrottled, err)
 			}
@@ -173,6 +176,8 @@ func gqlQuery(ctx context.Context, token, q string, vars map[string]any) (json.R
 		}
 
 		res, oc := gqlQueryOnce(ctx, token, body, vars)
+		quota.settle(reserved, res.points)
+		costs.observe(q, res.points)
 		switch oc {
 		case outcomeOK:
 			return res.data, nil
@@ -194,8 +199,12 @@ func gqlQuery(ctx context.Context, token, q string, vars map[string]any) (json.R
 		last = res
 		attempt++
 	}
-	return nil, fmt.Errorf("APS GraphQL flaky after %d attempts: %w", len(retryBackoffs), last.err)
+	return nil, fmt.Errorf("%w after %d attempts: %w", ErrFlaky, len(retryBackoffs), last.err)
 }
+
+// ErrFlaky is returned (wrapped) when a request kept failing in a way
+// that looked transient. The same request may succeed later.
+var ErrFlaky = errors.New("APS GraphQL flaky")
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
@@ -212,9 +221,11 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // or the data, not the weather: the same request gets the same answer,
 // however errorType is labelled. EXCEPTION_CLOSED_COMMUNITY, for one,
 // arrives as errorType UNKNOWN on the fusionWebUrl of every document in
-// a closed project.
+// a closed project, and DATA_HAS_ERROR on the assemblyRelations of a
+// document whose saved data is damaged.
 var deterministicCodes = map[string]bool{
 	"EXCEPTION_CLOSED_COMMUNITY": true,
+	"DATA_HAS_ERROR":             true,
 	"FORBIDDEN":                  true,
 	"UNAUTHORIZED":               true,
 	"BAD_REQUEST":                true,
@@ -269,14 +280,14 @@ func gqlQueryOnce(ctx context.Context, token string, body []byte, vars map[strin
 	if err := json.Unmarshal(raw, &gr); err != nil {
 		return result{err: fmt.Errorf("parsing GraphQL response: %w", err)}, outcomeFatal
 	}
-	quota.spent(gr.Extensions.PointValue.Requested)
+	points := gr.Extensions.PointValue.Requested
 
 	hasData := len(gr.Data) > 0 && string(gr.Data) != "null"
 	if len(gr.Errors) == 0 {
 		if !hasData {
-			return result{err: fmt.Errorf("empty GraphQL response (HTTP %d): %s", resp.StatusCode, raw)}, outcomeFatal
+			return result{points: points, err: fmt.Errorf("empty GraphQL response (HTTP %d): %s", resp.StatusCode, raw)}, outcomeFatal
 		}
-		return result{data: gr.Data}, outcomeOK
+		return result{points: points, data: gr.Data}, outcomeOK
 	}
 
 	// Errors and, possibly, data. Three cases:
@@ -302,12 +313,12 @@ func gqlQueryOnce(ctx context.Context, token string, body []byte, vars map[strin
 	gerr := fmt.Errorf("GraphQL errors: %s", strings.Join(msgs, "; "))
 	switch {
 	case transient:
-		return result{err: gerr}, outcomeTransient
+		return result{points: points, err: gerr}, outcomeTransient
 	case rootLost:
-		return result{err: gerr}, outcomeFatal
+		return result{points: points, err: gerr}, outcomeFatal
 	default:
 		dbgLog("GraphQL partial errors (kept data): %s", strings.Join(msgs, "; "))
-		return result{data: gr.Data}, outcomeOK
+		return result{points: points, data: gr.Data}, outcomeOK
 	}
 }
 

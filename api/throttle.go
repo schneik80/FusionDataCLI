@@ -23,9 +23,15 @@ import (
 //   - a pause shared by every request: once one request is throttled,
 //     none is sent until the pause is over;
 //   - a meter of the points this process spent in the last minute;
-//   - a budget for background work (assembly/part tags), which is held
-//     back while the meter is high so that what the user is waiting on
-//     gets the remaining points.
+//   - a price for every request before it is sent (cost.go): one that
+//     would take the meter past PointBudget waits until enough of the
+//     minute's spending has aged out, instead of being sent into a 429;
+//   - a lower budget for background work (assembly/part tags), so that
+//     what the user is waiting on gets the remaining points.
+//
+// The meter counts this process only. Another session on the same
+// account spends the same quota unseen, so a 429 can still arrive; the
+// shared pause is what handles it.
 
 const (
 	// throttlePauseStep is the pause after a first throttled response;
@@ -33,9 +39,13 @@ const (
 	throttlePauseStep = 5 * time.Second
 	throttlePauseMax  = 20 * time.Second
 
+	// PointBudget is the most points per minute this process spends.
+	// The quota behaves like roughly 10,000 points a minute; the margin
+	// covers a request priced too low on its first use.
+	PointBudget = 9000
+
 	// BackgroundPointBudget is the most points per minute this process
-	// spends before background requests wait. The quota behaves like
-	// roughly 10,000 points a minute; this leaves the rest for
+	// spends before background requests wait. It leaves the rest for
 	// navigation and for anything else using the same account.
 	BackgroundPointBudget = 5000
 )
@@ -51,8 +61,9 @@ type spend struct {
 
 type quotaState struct {
 	mu          sync.Mutex
-	window      []spend   // spends in the last minute
+	window      []*spend  // spends and reservations in the last minute
 	pausedUntil time.Time // no request is sent before this
+	heldUntil   time.Time // a foreground request is waiting for points until this
 	streak      int       // throttled responses in a row
 	throttles   int       // throttled responses, total
 
@@ -73,14 +84,25 @@ func Background(ctx context.Context) context.Context {
 	return context.WithValue(ctx, backgroundKey{}, true)
 }
 
-// spent records the points one request cost. A response that reports
-// points was not throttled, so the streak ends.
+// spent records points outside any reservation.
 func (s *quotaState) spent(points int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.streak = 0
 	if points > 0 {
-		s.window = append(s.window, spend{s.now(), points})
+		s.window = append(s.window, &spend{s.now(), points})
+	}
+}
+
+// settle replaces a reservation's estimate with what the request was
+// charged: the API's number, or nothing when it reported none (a
+// throttled or failed request is not charged). A response that reports
+// points was not throttled, so the streak ends.
+func (s *quotaState) settle(r *spend, points int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r.points = max(points, 0)
+	if points > 0 {
+		s.streak = 0
 	}
 }
 
@@ -118,43 +140,78 @@ func (s *quotaState) throttled(retryAfter time.Duration) {
 	dbgLog("THROTTLED pause=%s streak=%d spent_last_minute=%d", pause, s.streak, sumPoints(s.window))
 }
 
-func sumPoints(w []spend) (n int) {
+func sumPoints(w []*spend) (n int) {
 	for _, sp := range w {
 		n += sp.points
 	}
 	return n
 }
 
-// wait blocks until a request may be sent: past any throttle pause and,
-// for background work, until the meter is under the background budget.
-func (s *quotaState) wait(ctx context.Context) error {
+// freeIn returns how long until the last minute's spending has dropped
+// to at most target. The caller holds mu and has just called lastMinute.
+func (s *quotaState) freeIn(points, target int) time.Duration {
+	cut := s.now().Add(-time.Minute)
+	for _, sp := range s.window {
+		points -= sp.points
+		if points <= target {
+			return sp.at.Sub(cut)
+		}
+	}
+	return 0
+}
+
+// admit blocks until a request priced at cost may be sent — past any
+// throttle pause, and with room for it under the budget (PointBudget,
+// or BackgroundPointBudget for background work) — and reserves its
+// points so that requests admitted meanwhile see them. The caller must
+// settle the reservation with what the request was charged.
+//
+// A request that costs more than the whole budget goes when nothing
+// else has been spent in the last minute: holding it would hold it for
+// ever.
+func (s *quotaState) admit(ctx context.Context, cost int) (*spend, error) {
 	background := ctx.Value(backgroundKey{}) != nil
+	budget := PointBudget
+	if background {
+		budget = BackgroundPointBudget
+	}
 	for {
 		s.mu.Lock()
 		d := s.pausedUntil.Sub(s.now())
-		if d <= 0 && background {
-			if points, until := s.lastMinute(); points >= BackgroundPointBudget {
-				d = until
+		if d <= 0 {
+			if points, _ := s.lastMinute(); points > 0 && points+cost > budget {
+				d = s.freeIn(points, max(budget-cost, 0))
+				if until := s.now().Add(d); !background && until.After(s.heldUntil) {
+					s.heldUntil = until
+				}
+				dbgLog("HOLD cost=%d spent_last_minute=%d budget=%d wait=%s", cost, points, budget, d)
 			}
 		}
-		s.mu.Unlock()
 		if d <= 0 {
-			return nil
+			r := &spend{s.now(), cost}
+			s.window = append(s.window, r)
+			s.mu.Unlock()
+			return r, nil
 		}
+		s.mu.Unlock()
 		if err := s.sleep(ctx, d); err != nil {
-			return err
+			return nil, err
 		}
 	}
 }
 
 // Quota reports the points this process spent in the last minute, how
-// long requests are still paused after a throttled response (zero when
-// they are not), and how many throttled responses there have been.
+// long requests are still being held — paused after a throttled
+// response, or waiting for points under the budget — (zero when they
+// are not), and how many throttled responses there have been.
 func Quota() (pointsLastMinute int, pausedFor time.Duration, throttles int) {
 	quota.mu.Lock()
 	defer quota.mu.Unlock()
 	pointsLastMinute, _ = quota.lastMinute()
 	if d := quota.pausedUntil.Sub(quota.now()); d > 0 {
+		pausedFor = d
+	}
+	if d := quota.heldUntil.Sub(quota.now()); d > pausedFor {
 		pausedFor = d
 	}
 	return pointsLastMinute, pausedFor, quota.throttles
