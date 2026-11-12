@@ -30,7 +30,7 @@ type ItemLocation struct {
 // parentFolder iteratively until null — handles arbitrary folder depth
 // at the cost of one round-trip per ancestor level (typical: 2-4).
 func GetItemLocation(ctx context.Context, token, hubID, itemID string) (*ItemLocation, error) {
-	const itemQ = `
+	itemQ := `
 		query LocateItem($hubId: ID!, $itemId: ID!) {
 			item(hubId: $hubId, itemId: $itemId) {
 				project {
@@ -38,7 +38,7 @@ func GetItemLocation(ctx context.Context, token, hubID, itemID string) (*ItemLoc
 					hub { id }
 					alternativeIdentifiers { dataManagementAPIProjectId }
 				}
-				parentFolder { id name }
+				parentFolder ` + parentChain + `
 			}
 		}`
 
@@ -57,10 +57,7 @@ func GetItemLocation(ctx context.Context, token, hubID, itemID string) (*ItemLoc
 					DataManagementAPIProjectID string `json:"dataManagementAPIProjectId"`
 				} `json:"alternativeIdentifiers"`
 			} `json:"project"`
-			ParentFolder struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"parentFolder"`
+			ParentFolder *folderChain `json:"parentFolder"`
 		} `json:"item"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -79,37 +76,45 @@ func GetItemLocation(ctx context.Context, token, hubID, itemID string) (*ItemLoc
 
 	// Walk parentFolder up to the project root. Collect leaf-first then
 	// reverse so the caller gets root→leaf order, which is the order it
-	// needs to drill the Contents column.
-	const folderQ = `
+	// needs to drill the Contents column. Each query brings a chain of
+	// parentChainDepth ancestors, so only a deeper tree needs a second.
+	folderQ := `
 		query GetFolderParent($hubId: ID!, $folderId: ID!) {
 			folderByHubId(hubId: $hubId, folderId: $folderId) {
-				parentFolder { id name }
+				parentFolder ` + parentChain + `
 			}
 		}`
 
 	var ancestry []FolderRef
-	cur := raw.Item.ParentFolder
-	// Cap iterations defensively — a malformed schema response with a
-	// cycle would otherwise spin forever. APS folder trees in practice
-	// are well under 100 levels deep.
-	for i := 0; cur.ID != "" && i < 100; i++ {
-		ancestry = append(ancestry, FolderRef{ID: cur.ID, Name: cur.Name})
-		d, err := gqlQuery(ctx, token, folderQ, map[string]any{"hubId": hubID, "folderId": cur.ID})
+	chain := raw.Item.ParentFolder
+	// Cap the queries defensively — a malformed response with a cycle
+	// would otherwise spin forever. Folder trees in practice are a
+	// handful of levels deep.
+	for q := 0; chain != nil && chain.ID != "" && q < 20; q++ {
+		n := 0
+		var last *folderChain
+		for c := chain; c != nil && c.ID != ""; c = c.Parent {
+			ancestry = append(ancestry, FolderRef{ID: c.ID, Name: c.Name})
+			last = c
+			n++
+		}
+		// A chain shorter than was asked for ended at the project root.
+		if n < parentChainDepth {
+			break
+		}
+		d, err := gqlQuery(ctx, token, folderQ, map[string]any{"hubId": hubID, "folderId": last.ID})
 		if err != nil {
-			return nil, fmt.Errorf("walk folder %q: %w", cur.ID, err)
+			return nil, fmt.Errorf("walk folder %q: %w", last.ID, err)
 		}
 		var r struct {
 			FolderByHubId struct {
-				ParentFolder struct {
-					ID   string `json:"id"`
-					Name string `json:"name"`
-				} `json:"parentFolder"`
+				ParentFolder *folderChain `json:"parentFolder"`
 			} `json:"folderByHubId"`
 		}
 		if err := json.Unmarshal(d, &r); err != nil {
 			return nil, fmt.Errorf("walk folder decode: %w", err)
 		}
-		cur = r.FolderByHubId.ParentFolder
+		chain = r.FolderByHubId.ParentFolder
 	}
 
 	// Reverse leaf-first → root-first.
@@ -118,4 +123,27 @@ func GetItemLocation(ctx context.Context, token, hubID, itemID string) (*ItemLoc
 	}
 	loc.FolderPath = ancestry
 	return loc, nil
+}
+
+// parentChainDepth is how many ancestors one locate query asks for. A
+// folder's parent costs no more query points nested than asked for on
+// its own, so the whole chain rides on one request instead of one
+// request per level.
+const parentChainDepth = 6
+
+// parentChain is the selection for a folder and its ancestors, nested
+// parentChainDepth deep.
+var parentChain = func() string {
+	sel := "{ id name }"
+	for i := 1; i < parentChainDepth; i++ {
+		sel = "{ id name parentFolder " + sel + " }"
+	}
+	return sel
+}()
+
+// folderChain decodes parentChain.
+type folderChain struct {
+	ID     string       `json:"id"`
+	Name   string       `json:"name"`
+	Parent *folderChain `json:"parentFolder"`
 }

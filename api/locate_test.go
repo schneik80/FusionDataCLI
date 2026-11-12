@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"context"
 	"strings"
 	"sync/atomic"
@@ -17,11 +18,17 @@ func TestGetItemLocation_WalksFolderAncestry(t *testing.T) {
 	var calls atomic.Int32
 	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
 		n := calls.Add(1)
+		folder := func(id, name string, parent any) map[string]any {
+			return map[string]any{"id": id, "name": name, "parentFolder": parent}
+		}
 		switch n {
 		case 1:
-			// First query: item details + immediate parent folder.
+			// One query: the project and the whole chain of parents.
 			if !strings.Contains(req.Query, "LocateItem") {
 				t.Errorf("call 1: expected LocateItem query, got %q", req.Query)
+			}
+			if got := strings.Count(req.Query, "parentFolder"); got != parentChainDepth {
+				t.Errorf("query nests parentFolder %d deep, want %d", got, parentChainDepth)
 			}
 			return testutil.GraphQLResponse{Data: map[string]any{
 				"item": map[string]any{
@@ -33,41 +40,13 @@ func TestGetItemLocation_WalksFolderAncestry(t *testing.T) {
 							"dataManagementAPIProjectId": "a.proj1",
 						},
 					},
-					"parentFolder": map[string]any{"id": "F-leaf", "name": "Subassemblies"},
-				},
-			}}
-		case 2:
-			// Walk: F-leaf → F-mid
-			if got, _ := req.Variables["folderId"].(string); got != "F-leaf" {
-				t.Errorf("call 2: folderId = %v, want F-leaf", req.Variables["folderId"])
-			}
-			return testutil.GraphQLResponse{Data: map[string]any{
-				"folderByHubId": map[string]any{
-					"parentFolder": map[string]any{"id": "F-mid", "name": "Engineering"},
-				},
-			}}
-		case 3:
-			// Walk: F-mid → F-root
-			if got, _ := req.Variables["folderId"].(string); got != "F-mid" {
-				t.Errorf("call 3: folderId = %v, want F-mid", req.Variables["folderId"])
-			}
-			return testutil.GraphQLResponse{Data: map[string]any{
-				"folderByHubId": map[string]any{
-					"parentFolder": map[string]any{"id": "F-root", "name": "Top"},
-				},
-			}}
-		case 4:
-			// Walk: F-root → null (project root).
-			if got, _ := req.Variables["folderId"].(string); got != "F-root" {
-				t.Errorf("call 4: folderId = %v, want F-root", req.Variables["folderId"])
-			}
-			return testutil.GraphQLResponse{Data: map[string]any{
-				"folderByHubId": map[string]any{
-					"parentFolder": nil,
+					"parentFolder": folder("F-leaf", "Subassemblies",
+						folder("F-mid", "Engineering",
+							folder("F-root", "Top", nil))),
 				},
 			}}
 		}
-		t.Fatalf("unexpected extra call: %d", n)
+		t.Fatalf("unexpected extra call: %d (the chain ended inside the first answer)", n)
 		return testutil.GraphQLResponse{}
 	})
 	swapEndpoint(t, srv.URL)
@@ -124,5 +103,45 @@ func TestGetItemLocation_ProjectRootEmptyFolderPath(t *testing.T) {
 	}
 	if len(got.FolderPath) != 0 {
 		t.Errorf("FolderPath = %+v, want empty", got.FolderPath)
+	}
+}
+
+// TestGetItemLocation_DeepTreeContinues: a tree deeper than one query's
+// chain is continued from the last folder the chain reached.
+func TestGetItemLocation_DeepTreeContinues(t *testing.T) {
+	var calls atomic.Int32
+	chain := func(from, to int) any {
+		var c any
+		for i := to; i >= from; i-- {
+			c = map[string]any{"id": fmt.Sprintf("F%d", i), "name": fmt.Sprintf("n%d", i), "parentFolder": c}
+		}
+		return c
+	}
+	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
+		switch calls.Add(1) {
+		case 1:
+			return testutil.GraphQLResponse{Data: map[string]any{"item": map[string]any{
+				"project":      map[string]any{"id": "P1", "name": "Deep", "hub": map[string]any{"id": "H1"}},
+				"parentFolder": chain(1, parentChainDepth),
+			}}}
+		case 2:
+			if got := req.Variables["folderId"]; got != fmt.Sprintf("F%d", parentChainDepth) {
+				t.Errorf("continued from %v, want F%d", got, parentChainDepth)
+			}
+			return testutil.GraphQLResponse{Data: map[string]any{"folderByHubId": map[string]any{
+				"parentFolder": chain(parentChainDepth+1, parentChainDepth+2),
+			}}}
+		}
+		t.Fatalf("unexpected extra call")
+		return testutil.GraphQLResponse{}
+	})
+	swapEndpoint(t, srv.URL)
+
+	got, err := GetItemLocation(context.Background(), "tok", "H1", "I1")
+	if err != nil {
+		t.Fatalf("GetItemLocation: %v", err)
+	}
+	if len(got.FolderPath) != parentChainDepth+2 || got.FolderPath[0].ID != fmt.Sprintf("F%d", parentChainDepth+2) || got.FolderPath[len(got.FolderPath)-1].ID != "F1" {
+		t.Errorf("FolderPath = %+v, want %d folders from the root down to F1", got.FolderPath, parentChainDepth+2)
 	}
 }

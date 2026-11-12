@@ -276,7 +276,7 @@ func GetWhereUsed(ctx context.Context, token, hubID, itemID string) ([]Component
 								materialName { value }
 								component { partNumber { value } description { value } }
 							}
-							whereUsed(pagination: { limit: %[1]d }) {
+							whereUsed(pagination: { limit: %[3]d }) {
 								pagination { cursor }
 								results { __typename }
 							}
@@ -296,11 +296,11 @@ func GetWhereUsed(ctx context.Context, token, hubID, itemID string) ([]Component
 						results { id }
 					}
 				}
-				whereUsed(pagination: { limit: %[1]d }) `+body, refsPageSize, pageSize)
+				whereUsed(pagination: { limit: %[1]d }) `+body, firstPageSize, pageSize, refsPageSize)
 	qNext := fmt.Sprintf(`
 		query GetWhereUsedNext($hubId: ID!, $itemId: ID!, $cursor: String!) {
 			item(hubId: $hubId, itemId: $itemId) {
-				whereUsed(pagination: { cursor: $cursor, limit: %[1]d }) `+body, refsPageSize)
+				whereUsed(pagination: { cursor: $cursor, limit: %[1]d }) `+body, refsPageSize, pageSize, refsPageSize)
 
 	type itemRef struct {
 		Typename     string `json:"__typename"`
@@ -685,7 +685,7 @@ func GetDrawingsForDesign(ctx context.Context, token, hubID, designItemID string
 		query GetDrawingsForDesign($hubId: ID!, $itemId: ID!) {
 			item(hubId: $hubId, itemId: $itemId) {
 				... on DesignItem {
-					drawingItems(pagination: { limit: %d }) `, pageSize) + body
+					drawingItems(pagination: { limit: %d }) `, firstPageSize) + body
 	qNext := fmt.Sprintf(`
 		query GetDrawingsForDesignNext($hubId: ID!, $itemId: ID!, $cursor: String!) {
 			item(hubId: $hubId, itemId: $itemId) {

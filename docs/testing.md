@@ -147,8 +147,8 @@ This returns a closure that restores the prior value, so parallel-safe `t.Cleanu
 | Pattern | Used for | Example |
 |---|---|---|
 | `TestThing_DoesX` | Pure unit on `Thing` | `TestNavItemFromTypename`, `TestSanitizeHubID` |
-| `TestFunc_HappyPath` | The clean success path | `TestGqlQuery_HappyPath`, `TestClassifyAssembly_Part` |
-| `TestFunc_<Edge>` | A specific edge case | `TestGqlQuery_401_Wraps`, `TestClassifyAssembly_EmptyID`, `TestMigrateLegacy_DropsHubless` |
+| `TestFunc_HappyPath` | The clean success path | `TestGqlQuery_HappyPath`, `TestClassifyContents_Folder` |
+| `TestFunc_<Edge>` | A specific edge case | `TestGqlQuery_401_Wraps`, `TestClassifyContents_Errors`, `TestMigrateLegacy_DropsHubless` |
 | `TestUpdate_<Msg>_<Effect>` | Bubble Tea Update on a specific message | `TestUpdate_TabSelect_DispatchesLoad`, `TestUpdate_ItemClassified_StaleGenDropped`, `TestUpdate_ContentsLoaded_FansOutClassifyCmds` |
 | `TestHandle<X>_<Effect>` | A direct call to a handler method | `TestHandleItemLocation_CrossHub`, `TestHandleItemLocation_DrillsFolders` |
 | `TestView_<Scenario>_NoCrash` | Render-doesn't-panic tests across terminal sizes | `TestView_AfterHubSelect_NoCrash` |

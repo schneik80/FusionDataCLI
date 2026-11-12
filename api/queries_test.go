@@ -206,6 +206,32 @@ func TestGetProjects_FiltersInactive(t *testing.T) {
 	}
 }
 
+func TestGetSubFolders(t *testing.T) {
+	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
+		if !strings.Contains(req.Query, "foldersByFolderInHub") {
+			t.Errorf("query does not ask for foldersByFolderInHub: %s", req.Query)
+		}
+		if req.Variables["hubId"] != "h1" || req.Variables["folderId"] != "f1" {
+			t.Errorf("variables = %v, want hubId h1 and folderId f1", req.Variables)
+		}
+		return testutil.GraphQLResponse{Data: map[string]any{
+			"foldersByFolderInHub": map[string]any{
+				"pagination": map[string]any{"cursor": ""},
+				"results":    []map[string]any{{"id": "sub1", "name": "Nuts"}, {"id": "sub2", "name": "Washers"}},
+			},
+		}}
+	})
+	swapEndpoint(t, srv.URL)
+
+	got, err := GetSubFolders(context.Background(), "tok", "h1", "f1")
+	if err != nil {
+		t.Fatalf("GetSubFolders: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "sub1" || got[0].Name != "Nuts" || got[0].Kind != "folder" || !got[0].IsContainer {
+		t.Errorf("got %+v, want two folder containers starting with sub1/Nuts", got)
+	}
+}
+
 func TestGetItems_TypenameMapping(t *testing.T) {
 	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
 		if got, _ := req.Variables["hubId"].(string); got != "h1" {
@@ -261,19 +287,27 @@ func TestGetItems_TypenameMapping(t *testing.T) {
 	}
 }
 
-func TestGetItems_RequestsTipRootModel(t *testing.T) {
-	// The async classifier needs tipRootModel.id per design row to
-	// issue its assembly-relations probe without a second round-trip.
-	// This test pins the inline fragment into the request so a future
-	// query refactor can't silently strip it.
-	var sawFragment bool
+// TestGetItems_ListIsLean pins the cost of opening a folder. A list
+// page is charged per row asked for times the fields that carry a
+// cost; __typename, id and name carry none, so the page costs 11 query
+// points at any size. tipRootModel alone made it 261 for 50 rows, even
+// for an empty folder. The model id is fetched by ClassifyContents.
+func TestGetItems_ListIsLean(t *testing.T) {
 	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
-		if strings.Contains(req.Query, "... on DesignItem") &&
-			strings.Contains(req.Query, "tipRootModel { id }") {
-			sawFragment = true
+		for _, costly := range []string{"tipRootModel", "fusionWebUrl", "... on "} {
+			if strings.Contains(req.Query, costly) {
+				t.Errorf("list query asks for %q, which costs query points per row:\n%s", costly, req.Query)
+			}
+		}
+		if !strings.Contains(req.Query, "limit: 200") {
+			t.Errorf("list query should ask for pages of 200:\n%s", req.Query)
+		}
+		key := "itemsByFolder"
+		if strings.Contains(req.Query, "itemsByProject") {
+			key = "itemsByProject"
 		}
 		return testutil.GraphQLResponse{Data: map[string]any{
-			"itemsByFolder": map[string]any{
+			key: map[string]any{
 				"pagination": map[string]any{"cursor": ""},
 				"results":    []map[string]any{},
 			},
@@ -284,12 +318,12 @@ func TestGetItems_RequestsTipRootModel(t *testing.T) {
 	if _, err := GetItems(context.Background(), "tok", "h1", "f1"); err != nil {
 		t.Fatalf("GetItems: %v", err)
 	}
-	if !sawFragment {
-		t.Errorf("query did not include ... on DesignItem { tipRootModel { id } }")
+	if _, err := GetProjectItems(context.Background(), "tok", "p1"); err != nil {
+		t.Fatalf("GetProjectItems: %v", err)
 	}
 }
 
-func TestGetItems_PopulatesRootModelID(t *testing.T) {
+func TestGetItems_DesignRowsStartUnclassified(t *testing.T) {
 	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
 		return testutil.GraphQLResponse{Data: map[string]any{
 			"itemsByFolder": map[string]any{
@@ -323,14 +357,11 @@ func TestGetItems_PopulatesRootModelID(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("len = %d, want 3 (%+v)", len(got), got)
 	}
-	if got[0].RootModelID != "urn:model:1" {
-		t.Errorf("design[0].RootModelID = %q, want urn:model:1", got[0].RootModelID)
-	}
-	if got[1].RootModelID != "" {
-		t.Errorf("design[1].RootModelID = %q, want empty (no tipRoot)", got[1].RootModelID)
-	}
-	if got[2].RootModelID != "" {
-		t.Errorf("drawing.RootModelID = %q, want empty", got[2].RootModelID)
+	// The list no longer carries the model id, even if the API sent one.
+	for i := range got {
+		if got[i].RootModelID != "" {
+			t.Errorf("items[%d].RootModelID = %q, want empty", i, got[i].RootModelID)
+		}
 	}
 	// Designs start with empty Subtype — the async classifier fills
 	// it in later. Drawings, by contrast, are sub-typed synchronously

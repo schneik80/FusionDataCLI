@@ -126,7 +126,7 @@ func GetItemDetails(ctx context.Context, token, hubID, itemID string) (*ItemDeta
 				createdBy  { firstName lastName }
 				lastModifiedOn
 				lastModifiedBy { firstName lastName }` +
-		historySelection(fmt.Sprintf("limit: %d", historyPageSize), true) + `
+		historySelection(fmt.Sprintf("limit: %d", firstPageSize), true) + `
 			}
 		}`
 	qNext := `

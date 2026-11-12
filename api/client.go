@@ -109,17 +109,44 @@ type gqlError struct {
 }
 
 type gqlResponse struct {
-	Data   json.RawMessage `json:"data"`
-	Errors []gqlError      `json:"errors"`
+	Data       json.RawMessage `json:"data"`
+	Errors     []gqlError      `json:"errors"`
+	Extensions struct {
+		PointValue struct {
+			Requested int `json:"requestedQueryPointValue"`
+		} `json:"pointValue"`
+	} `json:"extensions"`
 }
 
-// retryBackoffs is the delay before each retry attempt (the first attempt
-// has no preceding delay, hence the leading 0). APS's MFG GraphQL gateway
-// returns intermittent NOT_FOUND with errorType:UNKNOWN on valid hub URNs;
-// see ~/Documents/aps-mfg-graphql-flakiness.md. Two retries with these
-// delays absorb the observed flakiness while keeping total worst-case
-// added latency under 2 s and well inside the 30 s nav-cmd context.
+// retryBackoffs is the delay before each attempt at a request that
+// failed transiently (the first attempt has no preceding delay, hence
+// the leading 0): a transport error, HTTP 5xx/408, or a GraphQL error
+// that nulled a root field with errorType UNKNOWN. The v2 gateway
+// returned intermittent NOT_FOUND/UNKNOWN on valid hub URNs; two retries
+// absorbed it. Throttling (HTTP 429) is not retried on this schedule —
+// see throttle.go.
 var retryBackoffs = []time.Duration{0, 500 * time.Millisecond, 1500 * time.Millisecond}
+
+// maxThrottleWaits bounds how often one request waits out a throttle
+// pause: several minutes in all, far beyond any quota window.
+const maxThrottleWaits = 15
+
+// outcome classifies one HTTP round-trip.
+type outcome int
+
+const (
+	outcomeOK        outcome = iota
+	outcomeFatal             // a real failure; asking again will not help
+	outcomeTransient         // worth another attempt on retryBackoffs
+	outcomeThrottled         // the per-minute point quota is spent
+)
+
+// result is what one round-trip produced.
+type result struct {
+	data       json.RawMessage
+	err        error
+	retryAfter time.Duration
+}
 
 func gqlQuery(ctx context.Context, token, q string, vars map[string]any) (json.RawMessage, error) {
 	body, err := json.Marshal(gqlRequest{Query: q, Variables: vars})
@@ -127,40 +154,81 @@ func gqlQuery(ctx context.Context, token, q string, vars map[string]any) (json.R
 		return nil, err
 	}
 
-	var lastErr error
-	for attempt, delay := range retryBackoffs {
-		if delay > 0 {
-			dbgLog("RETRY attempt=%d delay=%s lastErr=%v", attempt+1, delay, lastErr)
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(delay):
+	var last result
+	throttles := 0
+	for attempt := 0; attempt < len(retryBackoffs); {
+		if delay := retryBackoffs[attempt]; delay > 0 {
+			dbgLog("RETRY attempt=%d delay=%s lastErr=%v", attempt+1, delay, last.err)
+			if err := sleepCtx(ctx, delay); err != nil {
+				return nil, err
 			}
 		}
-		data, err, retriable := gqlQueryOnce(ctx, token, body, vars)
-		if err == nil {
-			return data, nil
-		}
-		lastErr = err
-		if !retriable {
+		// Hold while the API is throttling us, and hold background work
+		// while the minute's points are mostly spent.
+		if err := quota.wait(ctx); err != nil {
+			if throttles > 0 {
+				return nil, fmt.Errorf("%w (%v)", ErrThrottled, err)
+			}
 			return nil, err
 		}
+
+		res, oc := gqlQueryOnce(ctx, token, body, vars)
+		switch oc {
+		case outcomeOK:
+			return res.data, nil
+		case outcomeFatal:
+			return nil, res.err
+		case outcomeThrottled:
+			// Not an attempt: the request was never run. Everything
+			// waits out the pause, then this request goes again, for
+			// as long as the caller's context allows.
+			last = res
+			quota.throttled(res.retryAfter)
+			// The context normally ends the wait; the cap is for
+			// callers that passed one without a deadline.
+			if throttles++; throttles > maxThrottleWaits {
+				return nil, fmt.Errorf("%w (%v)", ErrThrottled, res.err)
+			}
+			continue
+		}
+		last = res
+		attempt++
 	}
-	return nil, fmt.Errorf("APS GraphQL flaky after %d attempts: %w", len(retryBackoffs), lastErr)
+	return nil, fmt.Errorf("APS GraphQL flaky after %d attempts: %w", len(retryBackoffs), last.err)
 }
 
-// gqlQueryOnce performs a single HTTP round-trip. The third return value
-// reports whether the error class is worth retrying — true for transport
-// errors, HTTP 5xx/408/429, and GraphQL errors carrying
-// extensions.errorType="UNKNOWN" (APS gateway's marker for intermittent
-// upstream failures). False for HTTP 401, parse errors, and concrete
-// GraphQL errors.
-func gqlQueryOnce(ctx context.Context, token string, body []byte, vars map[string]any) (json.RawMessage, error, bool) {
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// deterministicCodes are GraphQL error codes that describe the request
+// or the data, not the weather: the same request gets the same answer,
+// however errorType is labelled. EXCEPTION_CLOSED_COMMUNITY, for one,
+// arrives as errorType UNKNOWN on the fusionWebUrl of every document in
+// a closed project.
+var deterministicCodes = map[string]bool{
+	"EXCEPTION_CLOSED_COMMUNITY": true,
+	"FORBIDDEN":                  true,
+	"UNAUTHORIZED":               true,
+	"BAD_REQUEST":                true,
+	"BAD_USER_INPUT":             true,
+	"GRAPHQL_VALIDATION_FAILED":  true,
+}
+
+// gqlQueryOnce performs a single HTTP round-trip and classifies it.
+func gqlQueryOnce(ctx context.Context, token string, body []byte, vars map[string]any) (result, outcome) {
 	dbgLog("REQUEST vars=%v\n%s", vars, body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, graphqlEndpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, err, false
+		return result{err: err}, outcomeFatal
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -170,56 +238,116 @@ func gqlQueryOnce(ctx context.Context, token string, body []byte, vars map[strin
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, err, true
+		if ctx.Err() != nil {
+			return result{err: err}, outcomeFatal
+		}
+		return result{err: err}, outcomeTransient
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err, true
+		return result{err: err}, outcomeTransient
 	}
 
 	dbgLog("RESPONSE HTTP %d\n%s", resp.StatusCode, raw)
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, fmt.Errorf("unauthorized (HTTP 401) — token may be expired or lacks scope/entitlement; body: %s", raw), false
+		return result{err: fmt.Errorf("unauthorized (HTTP 401) — token may be expired or lacks scope/entitlement; body: %s", raw)}, outcomeFatal
 	}
-	if resp.StatusCode >= 500 || resp.StatusCode == 408 || resp.StatusCode == 429 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, raw), true
+	if resp.StatusCode == http.StatusTooManyRequests || isQuotaBody(raw) {
+		return result{
+			err:        fmt.Errorf("HTTP %d: %s", resp.StatusCode, raw),
+			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+		}, outcomeThrottled
+	}
+	if resp.StatusCode >= 500 || resp.StatusCode == 408 {
+		return result{err: fmt.Errorf("HTTP %d: %s", resp.StatusCode, raw)}, outcomeTransient
 	}
 
 	var gr gqlResponse
 	if err := json.Unmarshal(raw, &gr); err != nil {
-		return nil, fmt.Errorf("parsing GraphQL response: %w", err), false
+		return result{err: fmt.Errorf("parsing GraphQL response: %w", err)}, outcomeFatal
 	}
+	quota.spent(gr.Extensions.PointValue.Requested)
+
 	hasData := len(gr.Data) > 0 && string(gr.Data) != "null"
-	if len(gr.Errors) > 0 {
-		msgs := make([]string, len(gr.Errors))
-		// Retry only when an UNKNOWN-flavoured error nullifies the data
-		// at or near the root (path depth ≤ 2). Deep field-level errors
-		// (e.g. one item's fusionWebUrl is unreachable because its owning
-		// project was deactivated) leave the surrounding result list
-		// usable, so retrying is wasteful — the next attempt produces
-		// the same partial response.
-		retriable := false
-		for i, e := range gr.Errors {
-			msgs[i] = e.Message
-			if e.Extensions.ErrorType == "UNKNOWN" && len(e.Path) <= 2 {
-				retriable = true
-			}
+	if len(gr.Errors) == 0 {
+		if !hasData {
+			return result{err: fmt.Errorf("empty GraphQL response (HTTP %d): %s", resp.StatusCode, raw)}, outcomeFatal
 		}
-		// Surface partial data: if the response contains usable content
-		// (data is non-null and we aren't going to retry), pass it
-		// through. The errors are still recorded in the debug log via
-		// the response dump above, so they're not lost.
-		if !retriable && hasData {
-			dbgLog("GraphQL partial errors (kept data): %s", strings.Join(msgs, "; "))
-			return gr.Data, nil, false
+		return result{data: gr.Data}, outcomeOK
+	}
+
+	// Errors and, possibly, data. Three cases:
+	//   - An UNKNOWN error at or near the root (path depth ≤ 2) is the
+	//     gateway flakiness the retry exists for — unless its code says
+	//     the failure is a fact about the data, which no retry changes.
+	//   - An error that nulled a root field leaves nothing to show.
+	//   - Anything else left the rest of the answer usable: asking
+	//     again returns the same partial response, so the data is
+	//     passed through as it is.
+	msgs := make([]string, len(gr.Errors))
+	rootLost, transient := false, false
+	for i, e := range gr.Errors {
+		msgs[i] = describeError(e)
+		lost := !hasData || rootIsNull(gr.Data, e.Path)
+		if lost {
+			rootLost = true
 		}
-		return nil, fmt.Errorf("GraphQL errors: %s", strings.Join(msgs, "; ")), retriable
+		if (lost || len(e.Path) <= 2) && e.Extensions.ErrorType == "UNKNOWN" && !deterministicCodes[e.Extensions.Code] {
+			transient = true
+		}
 	}
-	if !hasData {
-		return nil, fmt.Errorf("empty GraphQL response (HTTP %d): %s", resp.StatusCode, raw), false
+	gerr := fmt.Errorf("GraphQL errors: %s", strings.Join(msgs, "; "))
+	switch {
+	case transient:
+		return result{err: gerr}, outcomeTransient
+	case rootLost:
+		return result{err: gerr}, outcomeFatal
+	default:
+		dbgLog("GraphQL partial errors (kept data): %s", strings.Join(msgs, "; "))
+		return result{data: gr.Data}, outcomeOK
 	}
-	return gr.Data, nil, false
+}
+
+// describeError renders one GraphQL error with what is needed to tell a
+// real failure from a transient one in a log or on the error screen:
+// the code and where in the response it struck.
+func describeError(e gqlError) string {
+	s := e.Message
+	var tags []string
+	if e.Extensions.Code != "" {
+		tags = append(tags, e.Extensions.Code)
+	}
+	if len(e.Path) > 0 {
+		parts := make([]string, len(e.Path))
+		for i, p := range e.Path {
+			parts[i] = fmt.Sprint(p)
+		}
+		tags = append(tags, "at "+strings.Join(parts, "."))
+	}
+	if len(tags) > 0 {
+		s += " [" + strings.Join(tags, " ") + "]"
+	}
+	return s
+}
+
+// rootIsNull reports whether the root field an error path starts at is
+// null (or absent) in data. An error with no path is taken to concern
+// the whole response.
+func rootIsNull(data json.RawMessage, path []any) bool {
+	if len(path) == 0 {
+		return true
+	}
+	name, ok := path[0].(string)
+	if !ok {
+		return true
+	}
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		return true
+	}
+	v, present := root[name]
+	return !present || string(v) == "null"
 }

@@ -27,16 +27,15 @@ flowchart TD
     caller --> details["Per-item queries\nGetItemDetails"]
     caller --> tabs["Cross-reference queries\nGetOccurrences (Uses)\nGetWhereUsed\nGetDrawingsForDesign\nGetDrawingSource (drawing → design)"]
     caller --> locate["Locate query\nGetItemLocation\n(walks parentFolder chain)"]
-    caller --> classify["ClassifyAssembly\n(assemblyRelations depth:1 limit:1 probe)\nbounded-parallelism via classifySem"]
+    caller --> classify["ClassifyContents\n(one page of designs per request:\nmodel id + assemblyRelations probe)\nbackground priority"]
 
     hierarchy --> ap["allPages()\npagination loop"]
     tabs --> ap
     details --> gql
     locate --> gql
-    classify --> sem["classifySem\n(buffered chan, cap 8)"]
-    sem --> gql
+    classify --> gql
 
-    ap --> gql["gqlQuery()\nretry loop\n(0 → 500ms → 1.5s)"]
+    ap --> gql["gqlQuery()\nthrottle pause + point meter\nretry loop (0 → 500ms → 1.5s)"]
     gql --> once["gqlQueryOnce()\nsingle HTTP round-trip\n+ JSON decode"]
     once --> http["net/http\nPOST /mfg/v3/graphql/public"]
     once --> debug["dbgLog()\nin-memory ring buffer\n+ debug.log file\n+ stderr if redirected"]
@@ -85,41 +84,12 @@ Fetches all hubs the authenticated user has access to.
 query GetHubs {
     hubs(pagination: { limit: 50 }) {
         pagination { cursor }
-        results {
-            id
-            name
-            fusionWebUrl
-            alternativeIdentifiers {
-                dataManagementAPIHubId
-            }
-        }
-    }
-}
-
-# Subsequent pages
-query GetHubsNext($cursor: String!) {
-    hubs(pagination: { cursor: $cursor, limit: 50 }) {
-        pagination { cursor }
-        results {
-            id
-            name
-            fusionWebUrl
-            alternativeIdentifiers {
-                dataManagementAPIHubId
-            }
-        }
+        results { id name }
     }
 }
 ```
 
-**Output fields used:**
-
-| Field | Maps to |
-|-------|---------|
-| `id` | `NavItem.ID` |
-| `name` | `NavItem.Name` |
-| `fusionWebUrl` | `NavItem.WebURL` |
-| `alternativeIdentifiers.dataManagementAPIHubId` | `NavItem.AltID` (used to build browser URLs) |
+Only `id` and `name` are asked for. `fusionWebUrl` and `alternativeIdentifiers` each cost 5 query points per row requested (250 for the page, however many hubs there are) and nothing read them; the page now costs 11 points instead of 511.
 
 ---
 
@@ -189,7 +159,7 @@ Fetches items (designs, drawings) directly under a project root (not inside a fo
 ```graphql
 # First page
 query GetProjectItems($projectId: ID!) {
-    itemsByProject(projectId: $projectId, pagination: { limit: 50 }) {
+    itemsByProject(projectId: $projectId, pagination: { limit: 200 }) {
         pagination { cursor }
         results {
             __typename
@@ -209,63 +179,60 @@ Fetches items within a specific folder.
 ```graphql
 # First page
 query GetItems($hubId: ID!, $folderId: ID!) {
-    itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { limit: 50 }) {
+    itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { limit: 200 }) {
+        pagination { cursor }
+        results { __typename id name }
+    }
+}
+```
+
+The list is deliberately lean. A list page is charged per row *asked for* times the fields that carry a cost, and `__typename`, `id` and `name` carry none: the page costs 11 query points at any size. With `tipRootModel { id }` on it, as before, a page of 50 cost 261 points even for an empty folder. `GetProjectItems` is the same. See [throttling.md](throttling.md).
+
+`itemsByFolder` returns documents only. A folder's sub-folders come from `GetSubFolders`:
+
+```graphql
+query GetSubFolders($hubId: ID!, $folderId: ID!) {
+    foldersByFolderInHub(hubId: $hubId, folderId: $folderId, pagination: { limit: 50 }) {
+        pagination { cursor }
+        results { id name }
+    }
+}
+```
+
+The UI asks for both when a folder is opened and lists the folders first. Without the second query a folder that holds only sub-folders looks empty.
+
+---
+
+### ClassifyContents — assembly/part tags
+
+Refines design rows from a generic "design" to `assembly` or `part` after the list has rendered, and supplies each design's root model id. Lives in `api/classify.go`.
+
+```graphql
+query ClassifyContents($hubId: ID!, $id: ID!) {
+    list: itemsByFolder(hubId: $hubId, folderId: $id, pagination: { limit: 50 }) {
         pagination { cursor }
         results {
-            __typename
-            id
-            name
+            __typename id
             ... on DesignItem {
-                tipRootModel { id }
+                tipRootModel {
+                    id
+                    assemblyRelations(depth: 1, pagination: { limit: 1 }) { results { id } }
+                }
             }
         }
     }
 }
 ```
 
-The `... on DesignItem` inline fragment captures `tipRootModel.id` per design row in the same query, so the async assembly classifier (see [ClassifyAssembly](#classifyassembly--asyncpartassembly-subtype) below) doesn't have to round-trip back to APS just to discover which model id to probe. A design whose data has not been migrated into the cloud information model returns `tipRootModel: null`; such rows keep the generic design icon and have no tabs. Drawings, configured designs, and folders ignore the fragment and the field simply isn't present in their results. `GetProjectItems` uses the same inline fragment for the project-root items.
+(`itemsByProject(projectId: $id …)` for a project root; `cursor: $cursor` for later pages.) Any direct child means assembly, none means part. `depth: 1` matters — without it `assemblyRelations` walks the whole tree. The limit is a hint (the probe usually returns two rows), which is harmless here.
 
----
+It costs 11 points per row asked for, so the UI asks for exactly the documents a page covers, at most 50 (561 points), and only for the page under the cursor and the one after it; later pages are fetched as the cursor approaches. A container with no designs is never asked, and tags are cached by item id for the session. One request covers a page; the earlier per-design `ClassifyAssembly` probe was one request for each design in the folder.
 
-### ClassifyAssembly — async part/assembly subtype
+`Component.hasChildren` looks like the cheaper signal. It is **not usable**: it returns `true` for single-body parts (a library screw with zero assembly relations reports `hasChildren: true`), so the relation probe stays.
 
-Lightweight probe used to refine each design row's icon from a generic "design" to either `assembly` or `part` after the items list has rendered. Lives in `api/classify.go`.
+**Priority.** The request is sent with `api.Background(ctx)`: it waits while the points spent in the last minute are at or above `BackgroundPointBudget` (5,000), so tags never crowd out navigation.
 
-```graphql
-query ClassifyAssembly($modelId: ID!) {
-    model(modelId: $modelId) {
-        assemblyRelations(depth: 1, pagination: { limit: 1 }) {
-            results { id }
-        }
-    }
-}
-```
-
-The query is intentionally cheap (6 points, ~0.7 s). Returning `len(results) > 0` is the entire classification decision: any direct child means assembly, none means part. `depth: 1` matters — without it `assemblyRelations` walks the whole tree. The limit is a hint (the probe usually returns two rows), which is harmless here.
-
-`Component.hasChildren` looks like the aggregate this probe was waiting for, and it could ride along on the items list for free. It is **not usable**: it returns `true` for single-body parts (a library screw with zero assembly relations and zero BOM relations reports `hasChildren: true`), so the relation probe stays.
-
-**Concurrency cap.** A package-level buffered channel acts as a semaphore so a fan-out of N classification cmds from a single `contentsLoadedMsg` translates into at most 8 simultaneous HTTPS round-trips against the gateway:
-
-```go
-var classifySem = make(chan struct{}, 8)
-
-func ClassifyAssembly(ctx context.Context, token, modelID string) (bool, error) {
-    select {
-    case classifySem <- struct{}{}:
-    case <-ctx.Done():
-        return false, ctx.Err()
-    }
-    defer func() { <-classifySem }()
-    // ... GraphQL call ...
-}
-```
-
-8 was chosen empirically against a real hub. Higher caps return diminishing throughput per the gateway's per-tenant rate limits; lower caps leave wall-clock latency on the table.
-
-**Cancellation.** `ClassifyAssembly` itself takes a context but does not implement explicit cancellation of in-flight calls when the user navigates away. Instead, the caller-side dispatch flow in `ui/app.go` carries a `contentsGen` counter on the Model that's incremented every time the Contents slice is replaced (folder drill, hub switch, project switch, refresh, error recovery). Each `classifyDesignCmd` captures the gen at dispatch and stamps it on the resulting `itemClassifiedMsg`; the Update handler drops the message when `msg.gen != m.contentsGen`. Late results aren't cancelled mid-flight — they complete, post their message, and get ignored. This is cheap and lock-free; see [`docs/architecture.md`](architecture.md#async-assembly-vs-part-classification) for the full sequence diagram.
-
-The classifier is fire-and-forget; per-row errors keep the row's generic design icon (graceful degradation) and never surface as user-visible noise.
+**Cancellation.** The Model's `contentsGen` counter is incremented every time the Contents slice is replaced. Each page carries the gen it was dispatched under; the Update handler drops a `contentsClassifiedMsg` whose gen no longer matches. A failed page leaves the rows with the generic design icon and is not retried for that folder.
 
 ---
 
@@ -420,7 +387,7 @@ type NavItem struct {
     // Subtype refines Kind into a displayed type tag in the Contents
     // column. Two fill paths:
     //
-    //   - Designs: filled in asynchronously by ClassifyAssembly
+    //   - Designs: filled in asynchronously by ClassifyContents
     //     ("assembly" | "part" | "" while in flight)
     //   - Drawings: filled in synchronously from the filename
     //     extension at items-list time ("dwg" | "template")
@@ -441,7 +408,7 @@ The primary signal is `__typename`. When that comes back as anything outside the
 | (set explicitly) | hub | `"hub"` | `true` | |
 | (set explicitly) | project | `"project"` | `true` | |
 | `__typename` | `Folder` | `"folder"` | `true` | |
-| `__typename` | `DesignItem` | `"design"` | `false` | `RootModelID` from inline `tipRootModel.id`; `Subtype` filled async by `ClassifyAssembly` |
+| `__typename` | `DesignItem` | `"design"` | `false` | `RootModelID` and `Subtype` filled async by `ClassifyContents` |
 | `__typename` | `DrawingItem` | `"drawing"` | `false` | `Subtype` filled synchronously: `"template"` for `.f2t`, `"dwg"` otherwise |
 | `__typename` | `ConfiguredDesignItem` | `"configured"` | `false` | |
 | extension | `.f3d` | `"design"` | `false` | Fallback when typename is unknown |
@@ -722,34 +689,28 @@ GraphQL errors are returned in a top-level `errors` array alongside `data`. Each
 
 **HTTP-level errors:**
 - `401 Unauthorized` → short-circuited before body parsing; surfaced as `"unauthorized (HTTP 401) — token may be expired or lacks scope/entitlement; body: <raw>"`. Bypassing the JSON decode avoids spurious "parsing GraphQL response" errors when APS returns a non-JSON 401 body.
-- `408 / 429 / 5xx` → retried (see below).
+- `408 / 5xx` → retried (see below).
+- `429` → the per-minute query quota is spent. Not retried on the flakiness schedule: every request waits out a shared pause and is then sent again. See [throttling.md](throttling.md).
 - Other 4xx → response body parsed and surfaced verbatim, no retry.
 
 ### Bounded retry on transient APS gateway flakiness
 
-The MFG GraphQL gateway intermittently returns `code:NOT_FOUND, errorType:UNKNOWN` for hub URNs it just successfully enumerated via the `hubs` query. The same query body, same access token, and same hub URN succeeds and fails within seconds. Repro details and a defect-report template are kept outside the repo at `~/Documents/aps-mfg-graphql-flakiness.md` so anyone can pick it up to file with APS.
+The v2 MFG GraphQL gateway intermittently returned `code:NOT_FOUND, errorType:UNKNOWN` for hub URNs it had just enumerated: same query, token and URN succeeding and failing within seconds. `gqlQuery` wraps `gqlQueryOnce` in a 3-attempt loop with backoffs `0 → 500 ms → 1.5 s` to absorb it.
 
-`gqlQuery` wraps `gqlQueryOnce` in a 3-attempt retry loop with bounded backoffs `0 → 500 ms → 1.5 s` (max ~2 s added latency, well inside the 30 s nav-cmd context). The retry decision:
+`gqlQueryOnce` classifies each round-trip:
 
-```mermaid
-flowchart TD
-    A[gqlQueryOnce returns] --> B{error?}
-    B -- no --> OK([return data])
-    B -- yes --> C{transport error<br/>or HTTP 408/429/5xx?}
-    C -- yes --> RETRY[retry with backoff]
-    C -- no --> D{HTTP 401?}
-    D -- yes --> FAIL([surface, no retry])
-    D -- no --> E{GraphQL errors[]<br/>contain errorType:UNKNOWN?}
-    E -- yes --> RETRY
-    E -- no --> FAIL
-    RETRY --> F{attempts left?}
-    F -- yes --> A
-    F -- no --> FINAL([surface 'flaky after N attempts'])
-```
+| Response | Outcome |
+|---|---|
+| Transport error, HTTP 408 / 5xx | transient — next attempt |
+| HTTP 429, or the quota message under any status | throttled — shared pause, then again; not an attempt |
+| HTTP 401, unparsable body, no data and no errors | fatal |
+| GraphQL error with `errorType: UNKNOWN`, at the root or path depth ≤ 2, whose code is not deterministic | transient |
+| GraphQL error that nulled the root field | fatal |
+| Any other GraphQL error | the data is passed through; the error goes to the debug log |
 
-Concrete `errorType` values (`VALIDATION`, `BAD_USER_INPUT`, etc.) and HTTP 401 are **never** retried — those are real errors. Only the gateway's `UNKNOWN` marker and transport/server-side faults trigger a retry.
+Deterministic codes are never retried, whatever `errorType` says: `EXCEPTION_CLOSED_COMMUNITY`, `FORBIDDEN`, `UNAUTHORIZED`, `BAD_REQUEST`, `BAD_USER_INPUT`, `GRAPHQL_VALIDATION_FAILED`. The list exists because `errorType: UNKNOWN` alone does not mean transient: a document in a closed project fails on `fusionWebUrl` (path depth 2) with `EXCEPTION_CLOSED_COMMUNITY` and `UNKNOWN` on every request, with the rest of the item intact. The earlier rule retried that three times and reported it as flaky, so such a document's details could not be shown.
 
-If the call is still failing after 3 attempts, the wrapped error reads `APS GraphQL flaky after 3 attempts: <last error>` so the symptom is distinguishable from a one-shot failure when reading logs.
+After 3 transient attempts the error reads `APS GraphQL flaky after 3 attempts: <last error>`. Every GraphQL error message carries its code and path, e.g. `… [NOT_FOUND at hub.projects]`.
 
 ---
 
@@ -760,7 +721,7 @@ Every query has a point value, reported in `extensions.pointValue.requestedQuery
 - **Per query: 1000 points.** A list costs 11 points whatever its page size. Selecting an object under each result (a design's `tipRootModel`, say) adds about 5 points per row *asked for* — the page size, not what comes back. Nested lists multiply.
 - **Per minute.** Once a minute's points are spent the API answers **HTTP 429** with `Query point value per minute quota exceeded with point value of N and remaining quota M`. On the test account the quota behaved like 10,000 points a minute. There was no `Retry-After` header. The counter punishes bursts: a client that spent 8,000 points, waited out the minute and spent 8,000 more was still throttled, so the audit spends at a steady rate instead.
 
-Interactive browsing stays far below the per-minute quota. `gqlQuery` retries a 429 three times with short backoffs and then surfaces the error.
+Interactive browsing can reach the per-minute quota, and before the changes described in [throttling.md](throttling.md) it did so easily: every folder cost 261 points to open. `gqlQuery` now waits out a 429 behind a pause shared by all requests, meters the points it spends, and holds background requests while the minute is mostly spent.
 
 ### QueryRaw — one round-trip, nothing hidden
 

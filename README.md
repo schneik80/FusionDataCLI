@@ -185,6 +185,7 @@ APS_CLIENT_ID=your-client-id ./fusiondatacli
 | [`docs/navigation.md`](docs/navigation.md) | Three-column browser, details-pane tabs, Show in Location, mouse, themes |
 | [`docs/api.md`](docs/api.md) | APS Manufacturing Data Model GraphQL queries, retry behaviour, debug logging |
 | [`docs/mfgdm-report.md`](docs/mfgdm-report.md) | The `-mfgdm-report` hub audit: flags, findings, accuracy and throttling |
+| [`docs/throttling.md`](docs/throttling.md) | Query points, the per-minute quota, and how the browser stays under it |
 | [`docs/authentication.md`](docs/authentication.md) | OAuth PKCE flow, token storage, refresh |
 | [`docs/architecture.md`](docs/architecture.md) | C4 diagrams, package layout, data flow, performance, resilience |
 | [`docs/debugging.md`](docs/debugging.md) | **Reporting a bug** — what to capture and how to file it |

@@ -14,6 +14,23 @@ import (
 // the project's first version.
 const pageSize = 50
 
+// firstPageSize is the size of the first page of the lists behind the
+// details tabs (Where Used, Drawings) and of the version history. Query
+// points are charged for the rows asked for, not the rows returned, and
+// these lists are usually short: asking for 50 where-used rows costs
+// 777 points even when the design is used nowhere. The first page is
+// therefore small, and only a list that turns out to be longer is paged
+// through at the full size.
+const firstPageSize = 10
+
+// itemsPageSize is the page size for the document lists of a folder or
+// a project root. A list page costs query points per row *asked for*
+// times the fields that carry a cost; __typename, id and name carry
+// none, so a page of 200 costs the same 11 points as a page of 1. The
+// model id and the assembly/part tag, which do cost, are fetched
+// afterwards for the rows on screen — see ClassifyContents.
+const itemsPageSize = "200"
+
 // allPages calls the API repeatedly until no next-page cursor is returned,
 // accumulating typed results across pages. It is parameterised on T so the
 // extract callback can decode straight into the caller's value type — no
@@ -77,30 +94,23 @@ func GetHubs(ctx context.Context, token string) ([]NavItem, error) {
 		query GetHubs {
 			hubs(pagination: { limit: 50 }) {
 				pagination { cursor }
-				results {
-					id name fusionWebUrl
-					alternativeIdentifiers { dataManagementAPIHubId }
-				}
+				results { id name }
 			}
 		}`
 	const qNext = `
 		query GetHubsNext($cursor: String!) {
 			hubs(pagination: { cursor: $cursor, limit: 50 }) {
 				pagination { cursor }
-				results {
-					id name fusionWebUrl
-					alternativeIdentifiers { dataManagementAPIHubId }
-				}
+				results { id name }
 			}
 		}`
 
+	// Only id and name: nothing reads a hub's web URL or its Data
+	// Management id, and each of the two costs 5 query points per row
+	// asked for (250 for the page), whatever the number of hubs.
 	type hubResult struct {
-		ID                     string `json:"id"`
-		Name                   string `json:"name"`
-		FusionWebURL           string `json:"fusionWebUrl"`
-		AlternativeIdentifiers struct {
-			DataManagementAPIHubID string `json:"dataManagementAPIHubId"`
-		} `json:"alternativeIdentifiers"`
+		ID   string `json:"id"`
+		Name string `json:"name"`
 	}
 
 	all, err := allPages(ctx, token, qFirst, qNext, nil, func(data json.RawMessage) (string, []hubResult, error) {
@@ -123,14 +133,7 @@ func GetHubs(ctx context.Context, token string) ([]NavItem, error) {
 
 	items := make([]NavItem, len(all))
 	for i, h := range all {
-		items[i] = NavItem{
-			ID:          h.ID,
-			Name:        h.Name,
-			Kind:        "hub",
-			AltID:       h.AlternativeIdentifiers.DataManagementAPIHubID,
-			WebURL:      h.FusionWebURL,
-			IsContainer: true,
-		}
+		items[i] = NavItem{ID: h.ID, Name: h.Name, Kind: "hub", IsContainer: true}
 	}
 	return items, nil
 }
@@ -146,7 +149,7 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 				projects(pagination: { limit: 50 }) {
 					pagination { cursor }
 					results {
-						id name fusionWebUrl projectStatus
+						id name projectStatus
 						alternativeIdentifiers { dataManagementAPIProjectId }
 					}
 				}
@@ -158,7 +161,7 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 				projects(pagination: { cursor: $cursor, limit: 50 }) {
 					pagination { cursor }
 					results {
-						id name fusionWebUrl projectStatus
+						id name projectStatus
 						alternativeIdentifiers { dataManagementAPIProjectId }
 					}
 				}
@@ -168,7 +171,6 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 	type projectResult struct {
 		ID                     string `json:"id"`
 		Name                   string `json:"name"`
-		FusionWebURL           string `json:"fusionWebUrl"`
 		ProjectStatus          string `json:"projectStatus"`
 		AlternativeIdentifiers struct {
 			DataManagementAPIProjectID string `json:"dataManagementAPIProjectId"`
@@ -205,7 +207,6 @@ func GetProjects(ctx context.Context, token, hubID string) ([]NavItem, error) {
 			Name:        p.Name,
 			Kind:        "project",
 			AltID:       p.AlternativeIdentifiers.DataManagementAPIProjectID,
-			WebURL:      p.FusionWebURL,
 			IsContainer: true,
 		})
 	}
@@ -263,28 +264,76 @@ func GetFolders(ctx context.Context, token, projectID string) ([]NavItem, error)
 }
 
 // ---------------------------------------------------------------------------
+// GetSubFolders
+// ---------------------------------------------------------------------------
+
+// GetSubFolders lists the folders directly inside a folder.
+// itemsByFolder returns documents only, so a folder's sub-folders have
+// to be asked for separately; without this a folder that holds nothing
+// but folders looks empty.
+func GetSubFolders(ctx context.Context, token, hubID, folderID string) ([]NavItem, error) {
+	const qFirst = `
+		query GetSubFolders($hubId: ID!, $folderId: ID!) {
+			foldersByFolderInHub(hubId: $hubId, folderId: $folderId, pagination: { limit: 50 }) {
+				pagination { cursor }
+				results { id name }
+			}
+		}`
+	const qNext = `
+		query GetSubFoldersNext($hubId: ID!, $folderId: ID!, $cursor: String!) {
+			foldersByFolderInHub(hubId: $hubId, folderId: $folderId, pagination: { cursor: $cursor, limit: 50 }) {
+				pagination { cursor }
+				results { id name }
+			}
+		}`
+
+	type folderResult struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+
+	all, err := allPages(ctx, token, qFirst, qNext, map[string]any{"hubId": hubID, "folderId": folderID}, func(data json.RawMessage) (string, []folderResult, error) {
+		var r struct {
+			Folders struct {
+				Pagination struct {
+					Cursor string `json:"cursor"`
+				} `json:"pagination"`
+				Results []folderResult `json:"results"`
+			} `json:"foldersByFolderInHub"`
+		}
+		if err := json.Unmarshal(data, &r); err != nil {
+			return "", nil, fmt.Errorf("sub-folders: %w", err)
+		}
+		return r.Folders.Pagination.Cursor, r.Folders.Results, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]NavItem, len(all))
+	for i, f := range all {
+		items[i] = NavItem{ID: f.ID, Name: f.Name, Kind: "folder", IsContainer: true}
+	}
+	return items, nil
+}
+
+// ---------------------------------------------------------------------------
 // GetProjectItems
 // ---------------------------------------------------------------------------
 
 func GetProjectItems(ctx context.Context, token, projectID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetProjectItems($projectId: ID!) {
-			itemsByProject(projectId: $projectId, pagination: { limit: 50 }) {
+			itemsByProject(projectId: $projectId, pagination: { limit: ` + itemsPageSize + ` }) {
 				pagination { cursor }
-				results {
-					__typename id name
-					... on DesignItem { tipRootModel { id } }
-				}
+				results { __typename id name }
 			}
 		}`
 	const qNext = `
 		query GetProjectItemsNext($projectId: ID!, $cursor: String!) {
-			itemsByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: 50 }) {
+			itemsByProject(projectId: $projectId, pagination: { cursor: $cursor, limit: ` + itemsPageSize + ` }) {
 				pagination { cursor }
-				results {
-					__typename id name
-					... on DesignItem { tipRootModel { id } }
-				}
+				results { __typename id name }
 			}
 		}`
 
@@ -320,22 +369,16 @@ func GetProjectItems(ctx context.Context, token, projectID string) ([]NavItem, e
 func GetItems(ctx context.Context, token, hubID, folderID string) ([]NavItem, error) {
 	const qFirst = `
 		query GetItems($hubId: ID!, $folderId: ID!) {
-			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { limit: 50 }) {
+			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { limit: ` + itemsPageSize + ` }) {
 				pagination { cursor }
-				results {
-					__typename id name
-					... on DesignItem { tipRootModel { id } }
-				}
+				results { __typename id name }
 			}
 		}`
 	const qNext = `
 		query GetItemsNext($hubId: ID!, $folderId: ID!, $cursor: String!) {
-			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { cursor: $cursor, limit: 50 }) {
+			itemsByFolder(hubId: $hubId, folderId: $folderId, pagination: { cursor: $cursor, limit: ` + itemsPageSize + ` }) {
 				pagination { cursor }
-				results {
-					__typename id name
-					... on DesignItem { tipRootModel { id } }
-				}
+				results { __typename id name }
 			}
 		}`
 
@@ -365,15 +408,11 @@ func GetItems(ctx context.Context, token, hubID, folderID string) ([]NavItem, er
 }
 
 // itemResult is the shared row shape returned by itemsByFolder and
-// itemsByProject. The DesignItem inline fragment fills in TipRoot;
-// drawings, configured designs, and folders leave it nil.
+// itemsByProject.
 type itemResult struct {
 	Typename string `json:"__typename"`
 	ID       string `json:"id"`
 	Name     string `json:"name"`
-	TipRoot  *struct {
-		ID string `json:"id"`
-	} `json:"tipRootModel,omitempty"`
 }
 
 // navItemFromResult maps a raw items-list row to a NavItem. Three
@@ -385,9 +424,9 @@ type itemResult struct {
 //     covers Fusion Electronics types. The v3 Item interface has only
 //     four concrete types (BasicItem, ConfiguredDesignItem, DesignItem,
 //     DrawingItem), so electronics rows have no typename of their own.
-//  3. tipRootModel.id — captured per design row so the
-//     async assembly classifier can probe assembly relations without a
-//     second round-trip.
+//
+// The design's model id and its assembly/part tag are not part of the
+// list; ClassifyContents fills them in afterwards.
 func navItemFromResult(it itemResult) NavItem {
 	n := navItemFromTypename(it.ID, it.Name, it.Typename)
 
@@ -409,9 +448,6 @@ func navItemFromResult(it itemResult) NavItem {
 		n.Subtype = drawingSubtypeFromExtension(it.Name)
 	}
 
-	if n.Kind == "design" && it.TipRoot != nil {
-		n.RootModelID = it.TipRoot.ID
-	}
 	return n
 }
 

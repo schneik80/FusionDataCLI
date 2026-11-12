@@ -94,7 +94,7 @@ These are the patterns that show up most often in `debug.log`. Recognising them 
 
 ### `RETRY attempt=N delay=… lastErr=…`
 
-The retry layer kicked in. v3.1.1+ has a 3-attempt retry loop for transient APS gateway flakiness — see [`api.md`](api.md#error-handling-and-retry). Seeing one or two retries is fine; seeing the loop bottom out with `APS GraphQL flaky after 3 attempts: …` after every action is a real bug worth filing.
+The retry layer kicked in. v3.1.1+ has a 3-attempt retry loop for transient APS gateway flakiness — see [`api.md`](api.md#error-handling-and-retry). Seeing one or two retries is fine. If the loop bottoms out with `APS GraphQL flaky after 3 attempts: …` every time for the same document, the error is probably not transient at all: its code and path are in the message (`[CODE at path]`), and a code that describes the data belongs in `deterministicCodes` in `api/client.go`.
 
 ### `code:NOT_FOUND, errorType:UNKNOWN, service:cw`
 
@@ -116,9 +116,13 @@ A response came back with both useful data and field-level errors. The client ke
 
 The app handed `<url>` to your OS browser handler (for `u`-key actions). If the page errors out (e.g. Autodesk's "WEB SESSION INVALID"), this line is the URL to check or copy manually.
 
-### `ClassifyAssembly` query bursts after a folder load
+### `ClassifyContents` after a folder load
 
-When the Contents column loads, the app dispatches up to 50 small `model(...).assemblyRelations(depth: 1, pagination: { limit: 1 })` queries in parallel, capped at 8 concurrent in flight by a semaphore. In `debug.log` this shows up as a burst of similar requests right after the `itemsByFolder` / `itemsByProject` response. Each one returns a short list (or empty) and refines a Contents-column row's icon to `· asm` or `· part`. If those queries 401 or get rate-limited, the corresponding rows silently keep their generic design icon — failures here never block navigation. See [`api.md`](api.md#classifyassembly--async-partassembly-subtype) for the query and the concurrency cap, and [`architecture.md`](architecture.md#async-assembly-vs-part-classification) for the cancellation pattern (a `contentsGen` counter on the Model drops late responses when the user has navigated away).
+When the Contents column loads and holds designs, the app sends one `ClassifyContents` query for the documents near the cursor (at most 50), and further pages as the cursor moves down. Each refines rows to `· asm` or `· part`. If one fails, the rows keep their generic design icon — failures here never block navigation. See [`api.md`](api.md#classifycontents--assemblypart-tags).
+
+### `THROTTLED pause=… streak=… spent_last_minute=…`
+
+The API answered HTTP 429: the account's per-minute query-point quota is spent. Every request waits for the pause and is then sent again. `spent_last_minute` is what this process spent; if it is low, something else on the same account is spending the quota (another session, the hub audit). See [`throttling.md`](throttling.md).
 
 ---
 

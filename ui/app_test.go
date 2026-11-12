@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -699,120 +700,187 @@ func TestUpdate_UsesLoadedMsg_PopulatesCacheAndClearsLoading(t *testing.T) {
 // Async assembly-vs-part classification
 // ---------------------------------------------------------------------------
 
-// TestUpdate_ItemClassified_UpdatesSubtype confirms that a fresh
-// itemClassifiedMsg whose gen matches m.contentsGen stamps the matching
-// row's Subtype to "assembly" or "part".
-func TestUpdate_ItemClassified_UpdatesSubtype(t *testing.T) {
-	m := Model{
-		state:        stateBrowsing,
-		width:        120,
-		height:       40,
-		contentsGen: 3,
-		cols: [numCols][]api.NavItem{
-			{},
-			{
-				{ID: "d1", Name: "Assembly", Kind: "design"},
-				{ID: "d2", Name: "Part", Kind: "design"},
-			},
-		},
-		spinner:      spinner.New(),
-		styleCache:   &styleCache{},
-		detailsCache: map[string]*api.ItemDetails{},
+// classifyModel is a browsing model whose Contents column holds one
+// folder followed by n unclassified designs d0..d(n-1).
+func classifyModel(n int) Model {
+	items := []api.NavItem{{ID: "f", Name: "Sub", Kind: "folder", IsContainer: true}}
+	for i := 0; i < n; i++ {
+		items = append(items, api.NavItem{ID: fmt.Sprintf("d%d", i), Name: "Design", Kind: "design"})
 	}
-
-	// Mark d1 as an assembly.
-	updated, _ := m.Update(itemClassifiedMsg{gen: 3, itemID: "d1", isAssembly: true})
-	m1 := updated.(Model)
-	if got := m1.cols[colContents][0].Subtype; got != "assembly" {
-		t.Errorf("d1 Subtype = %q, want assembly", got)
-	}
-	if got := m1.cols[colContents][1].Subtype; got != "" {
-		t.Errorf("d2 Subtype should be unchanged, got %q", got)
-	}
-
-	// Mark d2 as a part.
-	updated, _ = m1.Update(itemClassifiedMsg{gen: 3, itemID: "d2", isAssembly: false})
-	m2 := updated.(Model)
-	if got := m2.cols[colContents][1].Subtype; got != "part" {
-		t.Errorf("d2 Subtype = %q, want part", got)
+	return Model{
+		state:         stateBrowsing,
+		width:         120,
+		height:        40,
+		selectedHubID: "h1",
+		activeCol:     colContents,
+		cols:          [numCols][]api.NavItem{{}, items},
+		spinner:       spinner.New(),
+		styleCache:    &styleCache{},
+		detailsCache:  map[string]*api.ItemDetails{},
+		classCache:    map[string]api.Classification{},
 	}
 }
 
-// TestUpdate_ItemClassified_StaleGenDropped confirms that an
-// itemClassifiedMsg dispatched against a previous folder selection is
-// silently ignored when m.contentsGen has moved on. This is the
-// cancellation primitive for the parallel-classify pipeline.
-func TestUpdate_ItemClassified_StaleGenDropped(t *testing.T) {
-	m := Model{
-		state:       stateBrowsing,
-		width:       120,
-		height:      40,
-		contentsGen: 5, // current
-		cols: [numCols][]api.NavItem{
-			{},
-			{{ID: "d1", Name: "Design", Kind: "design"}},
-		},
-		spinner:      spinner.New(),
-		styleCache:   &styleCache{},
-		detailsCache: map[string]*api.ItemDetails{},
+// TestClassify_PagesFollowTheCursor: tags are bought a page at a time.
+// Opening a long folder asks for one page; the next page is asked for
+// only once the cursor comes within a page of the untagged rows; and a
+// page that answers is applied, cached, and counted as covered.
+func TestClassify_PagesFollowTheCursor(t *testing.T) {
+	m := classifyModel(180)
+	m.contentsGen = 4
+
+	if cmd := m.startClassify("folder-1", false); cmd == nil {
+		t.Fatal("opening a folder with untagged designs should ask for the first page")
+	}
+	if !m.classify.inFlight {
+		t.Fatal("first page should be in flight")
+	}
+	if m.classifyMore() != nil {
+		t.Error("no second request while one is in flight")
 	}
 
-	updated, _ := m.Update(itemClassifiedMsg{gen: 2 /* stale */, itemID: "d1", isAssembly: true})
-	um := updated.(Model)
-	if got := um.cols[colContents][0].Subtype; got != "" {
-		t.Errorf("stale-gen msg should not mutate Subtype, got %q", got)
+	// The first page answers: d0 is an assembly, d1 a part.
+	updated, cmd := m.Update(contentsClassifiedMsg{gen: 4, asked: 50, next: "c1", rows: []api.Classification{
+		{ItemID: "d0", RootModelID: "m0", IsAssembly: true},
+		{ItemID: "d1", RootModelID: "m1"},
+	}})
+	m = updated.(Model)
+	if got := m.cols[colContents][1]; got.Subtype != "assembly" || got.RootModelID != "m0" {
+		t.Errorf("d0 = %+v, want assembly with model m0", got)
 	}
-}
-
-// TestUpdate_ItemClassified_ErrorDropped: a per-row classify failure
-// keeps the generic design icon (graceful degradation) rather than
-// surfacing as a user-visible error. The renderer treats an empty
-// Subtype on a design as "not yet classified" — same as in-flight.
-func TestUpdate_ItemClassified_ErrorDropped(t *testing.T) {
-	m := Model{
-		state:       stateBrowsing,
-		width:       120,
-		height:      40,
-		contentsGen: 1,
-		cols: [numCols][]api.NavItem{
-			{},
-			{{ID: "d1", Name: "Design", Kind: "design"}},
-		},
-		spinner:      spinner.New(),
-		styleCache:   &styleCache{},
-		detailsCache: map[string]*api.ItemDetails{},
+	if got := m.cols[colContents][2].Subtype; got != "part" {
+		t.Errorf("d1 Subtype = %q, want part", got)
 	}
-
-	updated, _ := m.Update(itemClassifiedMsg{gen: 1, itemID: "d1", err: errors.New("flaky")})
-	um := updated.(Model)
-	if got := um.cols[colContents][0].Subtype; got != "" {
-		t.Errorf("err msg should not mutate Subtype, got %q", got)
+	if m.classify.covered != 50 || m.classify.cursor != "c1" {
+		t.Errorf("covered=%d cursor=%q, want 50 and c1", m.classify.covered, m.classify.cursor)
 	}
-}
-
-// TestClassifyContentsCmd_OnlyDesigns asserts that the fan-out cmd
-// skips non-designs and unclassifiable designs (no root model
-// id). Drawings, folders, and already-classified rows must not produce
-// extra round-trips.
-func TestClassifyContentsCmd_OnlyDesigns(t *testing.T) {
-	items := []api.NavItem{
-		{ID: "d1", Kind: "design", RootModelID: "cv1"},   // classify
-		{ID: "d2", Kind: "design", RootModelID: ""},      // skip (no cv)
-		{ID: "d3", Kind: "design", RootModelID: "cv3", Subtype: "part"}, // skip (already classified)
-		{ID: "dw", Kind: "drawing"},                              // skip (non-design)
-		{ID: "f1", Kind: "folder", IsContainer: true},            // skip (container)
-	}
-	cmd := classifyContentsCmd("tok", items, 1)
+	// The cursor is at the top, so the second page (rows 50–99) is
+	// within a page of it and is fetched ahead; the third is not.
 	if cmd == nil {
-		t.Fatal("expected a batch cmd when at least one design is classifiable, got nil")
+		t.Fatal("the page after the cursor's should be fetched ahead")
+	}
+	updated, cmd = m.Update(contentsClassifiedMsg{gen: 4, asked: 50, next: "c2"})
+	m = updated.(Model)
+	if cmd != nil || m.classify.done {
+		t.Fatalf("with the cursor at the top, rows past 100 should wait (cmd=%v done=%v)", cmd != nil, m.classify.done)
 	}
 
-	// All non-classifiables should also short-circuit to nil.
-	if classifyContentsCmd("tok", []api.NavItem{
-		{ID: "dw", Kind: "drawing"},
-		{ID: "f1", Kind: "folder", IsContainer: true},
-	}, 1) != nil {
-		t.Errorf("expected nil cmd when no designs need classifying")
+	// Moving the cursor down near the untagged rows asks for more.
+	m.cursors[colContents] = 60
+	if m.classifyMore() == nil {
+		t.Error("cursor near untagged rows should ask for the next page")
+	}
+
+	// The last page ends the walk.
+	updated, _ = m.Update(contentsClassifiedMsg{gen: 4, asked: 50, next: ""})
+	m = updated.(Model)
+	if !m.classify.done || m.classifyMore() != nil {
+		t.Error("an empty next cursor should end classification")
+	}
+	if _, ok := m.classCache["d0"]; !ok {
+		t.Error("tags should be cached for the session")
+	}
+}
+
+// TestClassify_CacheMakesRevisitsFree: a folder whose designs were all
+// tagged earlier in the session costs no classification request.
+func TestClassify_CacheMakesRevisitsFree(t *testing.T) {
+	m := classifyModel(2)
+	m.classCache["d0"] = api.Classification{ItemID: "d0", RootModelID: "m0", IsAssembly: true}
+	m.classCache["d1"] = api.Classification{ItemID: "d1", RootModelID: "m1"}
+
+	if cmd := m.startClassify("folder-1", false); cmd != nil {
+		t.Error("everything is cached: no request expected")
+	}
+	if m.cols[colContents][1].Subtype != "assembly" || m.cols[colContents][2].Subtype != "part" {
+		t.Errorf("cached tags not applied: %+v", m.cols[colContents])
+	}
+}
+
+// TestClassify_NothingToTag: folders, drawings and other files never
+// cause a classification request.
+func TestClassify_NothingToTag(t *testing.T) {
+	m := classifyModel(0)
+	m.cols[colContents] = append(m.cols[colContents], api.NavItem{ID: "dw", Kind: "drawing"})
+	if cmd := m.startClassify("folder-1", false); cmd != nil {
+		t.Error("no designs: no request expected")
+	}
+}
+
+// TestUpdate_ContentsClassified_StaleGenDropped confirms that a page
+// dispatched against a previous folder selection is ignored once
+// m.contentsGen has moved on. This is the cancellation primitive.
+func TestUpdate_ContentsClassified_StaleGenDropped(t *testing.T) {
+	m := classifyModel(1)
+	m.contentsGen = 5
+	updated, _ := m.Update(contentsClassifiedMsg{gen: 2 /* stale */, asked: 1, rows: []api.Classification{{ItemID: "d0", IsAssembly: true}}})
+	um := updated.(Model)
+	if got := um.cols[colContents][1].Subtype; got != "" {
+		t.Errorf("stale-gen page should not mutate Subtype, got %q", got)
+	}
+}
+
+// TestUpdate_ContentsClassified_ErrorStops: a failed page keeps the
+// generic design icon (graceful degradation) rather than surfacing as
+// a user-visible error, and the folder is not asked again.
+func TestUpdate_ContentsClassified_ErrorStops(t *testing.T) {
+	m := classifyModel(1)
+	m.contentsGen = 1
+	m.startClassify("folder-1", false)
+	updated, cmd := m.Update(contentsClassifiedMsg{gen: 1, asked: 1, err: errors.New("boom")})
+	um := updated.(Model)
+	if got := um.cols[colContents][1].Subtype; got != "" {
+		t.Errorf("err page should not mutate Subtype, got %q", got)
+	}
+	if cmd != nil || !um.classify.done || um.state != stateBrowsing {
+		t.Errorf("a failed page should stop quietly (cmd=%v done=%v state=%v)", cmd != nil, um.classify.done, um.state)
+	}
+}
+
+// TestDetails_WaitForTheCursorToRest: moving onto a document does not
+// fetch its details at once. The fetch happens when the delay fires
+// and the cursor is still there; if it moved on, nothing is fetched.
+func TestDetails_WaitForTheCursorToRest(t *testing.T) {
+	m := classifyModel(3)
+	m.classify.done = true
+	m.cursors[colContents] = 1 // d0
+
+	if cmd := m.maybeLoadDetails(); cmd == nil || !m.detailsLoading {
+		t.Fatal("landing on a document should arm the details delay")
+	}
+
+	// The cursor moved to d1 before the delay fired: nothing to fetch.
+	moved := m
+	moved.cursors[colContents] = 2
+	if _, cmd := moved.Update(detailsDueMsg{itemID: "d0"}); cmd != nil {
+		t.Error("the cursor moved on: no details request expected")
+	}
+	// Still on d0: fetch.
+	if _, cmd := m.Update(detailsDueMsg{itemID: "d0"}); cmd == nil {
+		t.Error("the cursor rested on d0: details request expected")
+	}
+}
+
+// TestUpdate_DetailsLoaded_StaleResponseIsNotShown: a details answer
+// for a document the cursor has left is cached but does not replace
+// what the pane shows for the current selection.
+func TestUpdate_DetailsLoaded_StaleResponseIsNotShown(t *testing.T) {
+	m := classifyModel(3)
+	m.classify.done = true
+	m.cursors[colContents] = 2 // d1
+	m.detailsLoading = true
+
+	updated, _ := m.Update(detailsLoadedMsg{&api.ItemDetails{ID: "d0", Name: "old"}})
+	um := updated.(Model)
+	if um.details != nil || !um.detailsLoading {
+		t.Errorf("a stale answer must not be shown (details=%+v loading=%v)", um.details, um.detailsLoading)
+	}
+	if um.detailsCache["d0"] == nil {
+		t.Error("a stale answer should still be cached")
+	}
+	updated, _ = um.Update(detailsLoadedMsg{&api.ItemDetails{ID: "d1", Name: "current"}})
+	if got := updated.(Model).details; got == nil || got.ID != "d1" {
+		t.Errorf("the current document's details should be shown, got %+v", got)
 	}
 }
 

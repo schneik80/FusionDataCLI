@@ -97,7 +97,13 @@ type (
 	tokenReadyMsg      struct{ token string }
 	hubsLoadedMsg      struct{ items []api.NavItem }
 	projectsLoadedMsg  struct{ items []api.NavItem }
-	contentsLoadedMsg  struct{ items []api.NavItem }
+	contentsLoadedMsg  struct {
+		items []api.NavItem
+		// The folder or project root the items belong to, for the
+		// follow-up classification of its designs.
+		containerID string
+		isProject   bool
+	}
 	detailsLoadedMsg   struct{ details *api.ItemDetails }
 	// usesLoadedMsg / whereUsedLoadedMsg / drawingsLoadedMsg deliver the
 	// async result of a per-tab fetch. modelID identifies which root
@@ -154,18 +160,24 @@ type (
 		path string
 		err  error
 	}
-	// itemClassifiedMsg refines a single Contents-column row's design
-	// subtype (assembly vs part) after the async ClassifyAssembly probe
-	// returns. gen carries the contentsGen value at dispatch time so
-	// late-arriving refinements that belong to a folder the user has
-	// already navigated away from are dropped on the floor instead of
-	// stamping stale state onto the new selection.
-	itemClassifiedMsg struct {
-		gen        int
-		itemID     string
-		isAssembly bool
-		err        error
+	// contentsClassifiedMsg carries one page of assembly/part tags for
+	// the Contents column (api.ClassifyContents). gen is the contentsGen
+	// value at dispatch time, so a page that belongs to a folder the
+	// user has already left is dropped instead of stamping stale state
+	// onto the new selection. asked is the page size requested, next
+	// the cursor for the page after it.
+	contentsClassifiedMsg struct {
+		gen   int
+		rows  []api.Classification
+		asked int
+		next  string
+		err   error
 	}
+	// detailsDueMsg fires a moment after the cursor lands on a
+	// document. The details are fetched only if the cursor is still
+	// there, so running the cursor down a list does not buy a details
+	// query (and whatever the active tab needs) for every row passed.
+	detailsDueMsg struct{ itemID string }
 )
 
 // ---------------------------------------------------------------------------
@@ -289,6 +301,22 @@ type Model struct {
 	// already moved on can't stamp stale "assembly" / "part" onto
 	// the new selection.
 	contentsGen int
+
+	// classify tracks the assembly/part tagging of the Contents
+	// column, which is bought a page at a time as the cursor nears
+	// rows that are not tagged yet. covered counts the documents, in
+	// list order, that the pages fetched so far span.
+	classify struct {
+		containerID string
+		isProject   bool
+		cursor      string
+		covered     int
+		inFlight    bool
+		done        bool
+	}
+	// classCache remembers the tags by item id for the session, so
+	// coming back to a folder costs nothing.
+	classCache map[string]api.Classification
 
 	// For column 2: when drilling into a subfolder, track the stack so we can go back.
 	folderStack []breadcrumbEntry
@@ -415,6 +443,7 @@ func New(cfg *config.Config, cfgErr error, version string) Model {
 			mouseEnabled:   true,
 			pins:           loadedPins,
 			detailsCache:   make(map[string]*api.ItemDetails),
+			classCache:     make(map[string]api.Classification),
 			usesCache:      make(map[string][]api.ComponentRef),
 			whereUsedCache: make(map[string][]api.ComponentRef),
 			drawingsCache:  make(map[string][]api.DrawingRef),
@@ -431,6 +460,7 @@ func New(cfg *config.Config, cfgErr error, version string) Model {
 		mouseEnabled:   true,
 		pins:           loadedPins,
 		detailsCache:   make(map[string]*api.ItemDetails),
+		classCache:     make(map[string]api.Classification),
 		usesCache:      make(map[string][]api.ComponentRef),
 		whereUsedCache: make(map[string][]api.ComponentRef),
 		drawingsCache:  make(map[string][]api.DrawingRef),
@@ -546,7 +576,7 @@ func loadProjectContentsCmd(token, projectID string) tea.Cmd {
 			return errMsg{iErr}
 		}
 		combined := append(folders, items...)
-		return contentsLoadedMsg{combined}
+		return contentsLoadedMsg{items: combined, containerID: projectID, isProject: true}
 	}
 }
 
@@ -554,47 +584,122 @@ func loadItemsCmd(token, hubID, folderID string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
 		defer cancel()
-		items, err := api.GetItems(ctx, token, hubID, folderID)
-		if err != nil {
-			return errMsg{err}
+
+		// A folder's documents and its sub-folders come from two
+		// different queries; fetch both and list folders first, the
+		// way a project root does.
+		var (
+			folders, items []api.NavItem
+			fErr, iErr     error
+			wg             sync.WaitGroup
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			folders, fErr = api.GetSubFolders(ctx, token, hubID, folderID)
+		}()
+		go func() {
+			defer wg.Done()
+			items, iErr = api.GetItems(ctx, token, hubID, folderID)
+		}()
+		wg.Wait()
+		if fErr != nil {
+			return errMsg{fErr}
 		}
-		return contentsLoadedMsg{items}
+		if iErr != nil {
+			return errMsg{iErr}
+		}
+		return contentsLoadedMsg{items: append(folders, items...), containerID: folderID}
 	}
 }
 
-// classifyDesignCmd runs api.ClassifyAssembly off the main goroutine and
-// posts an itemClassifiedMsg back to Update when it completes. The gen
-// argument is captured at dispatch time and echoed in the response so a
-// late refinement after the user has navigated away can be ignored — see
-// the itemClassifiedMsg handler in Update for the gen check. The API
-// call itself rate-limits via a package-level semaphore (8 concurrent),
-// so a fanout of 50 cmds here doesn't translate into 50 simultaneous
-// HTTPS connections against the gateway.
-func classifyDesignCmd(token, itemID, modelID string, gen int) tea.Cmd {
+// classifyPageCmd fetches the assembly/part tags for one page of a
+// container's documents. The request is background work: api holds it
+// back while the minute's query points are mostly spent, so the tags
+// never crowd out what the user is waiting on.
+func classifyPageCmd(token, hubID, containerID string, isProject bool, limit int, cursor string, gen int) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), classifyTimeout)
 		defer cancel()
-		isAsm, err := api.ClassifyAssembly(ctx, token, modelID)
-		return itemClassifiedMsg{gen: gen, itemID: itemID, isAssembly: isAsm, err: err}
+		rows, next, err := api.ClassifyContents(ctx, token, hubID, containerID, isProject, limit, cursor)
+		return contentsClassifiedMsg{gen: gen, rows: rows, asked: limit, next: next, err: err}
 	}
 }
 
-// classifyContentsCmd fans out classifyDesignCmd over every DesignItem
-// in items that has a known modelID. Returns nil when nothing
-// needs classifying so Update can return (m, nil) cleanly. The cmds run
-// concurrently under tea.Batch; the gateway-side concurrency cap lives
-// in api.ClassifyAssembly's semaphore.
-func classifyContentsCmd(token string, items []api.NavItem, gen int) tea.Cmd {
-	var cmds []tea.Cmd
-	for _, it := range items {
-		if it.Kind == "design" && it.RootModelID != "" && it.Subtype == "" {
-			cmds = append(cmds, classifyDesignCmd(token, it.ID, it.RootModelID, gen))
+// classifyTimeout is generous: a classification page may sit out a
+// throttle pause or wait for the background point budget.
+const classifyTimeout = 90 * time.Second
+
+// detailsDelay is how long the cursor has to rest on a document before
+// its details are fetched.
+const detailsDelay = 150 * time.Millisecond
+
+// applyClassification stamps one design row with its tag and model id.
+func applyClassification(it *api.NavItem, c api.Classification) {
+	it.RootModelID = c.RootModelID
+	if c.IsAssembly {
+		it.Subtype = "assembly"
+	} else {
+		it.Subtype = "part"
+	}
+}
+
+// startClassify resets the tagging state for freshly loaded contents,
+// applies whatever the session already knows, and asks for the first
+// page if the cursor's neighbourhood needs one.
+func (m *Model) startClassify(containerID string, isProject bool) tea.Cmd {
+	m.classify.containerID, m.classify.isProject = containerID, isProject
+	m.classify.cursor, m.classify.covered = "", 0
+	m.classify.inFlight, m.classify.done = false, containerID == ""
+	for i := range m.cols[colContents] {
+		it := &m.cols[colContents][i]
+		if c, ok := m.classCache[it.ID]; ok && it.Kind == "design" {
+			applyClassification(it, c)
 		}
 	}
-	if len(cmds) == 0 {
+	return m.classifyMore()
+}
+
+// classifyMore returns the command for the next page of tags when one
+// is wanted: nothing is in flight, the list is not exhausted, and the
+// cursor is within a page of documents the pages so far do not span.
+// Documents follow the folders in the column and classification pages
+// follow the document order, so the count of documents covered is
+// enough to tell.
+func (m *Model) classifyMore() tea.Cmd {
+	c := &m.classify
+	if c.done || c.inFlight || m.selectedHubID == "" {
 		return nil
 	}
-	return tea.Batch(cmds...)
+	items := m.cols[colContents]
+	folders := 0
+	for folders < len(items) && items[folders].IsContainer {
+		folders++
+	}
+	docs := items[folders:]
+	if c.covered >= len(docs) {
+		c.done = true
+		return nil
+	}
+	// Nothing left to learn past the covered rows? Then stop for good.
+	pending := false
+	for _, it := range docs[c.covered:] {
+		if it.Kind == "design" && it.Subtype == "" {
+			pending = true
+			break
+		}
+	}
+	if !pending {
+		c.done = true
+		return nil
+	}
+	at := max(0, m.cursors[colContents]-folders)
+	if c.covered > at+api.ClassifyPageSize {
+		return nil // far enough ahead of the cursor for now
+	}
+	c.inFlight = true
+	limit := min(api.ClassifyPageSize, len(docs)-c.covered)
+	return classifyPageCmd(m.token, m.selectedHubID, c.containerID, c.isProject, limit, c.cursor, m.contentsGen)
 }
 
 func loadDetailsCmd(token, hubID, itemID string) tea.Cmd {
@@ -881,27 +986,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selectedProjectAltID = ""
 		return m, nil
 
-	case itemClassifiedMsg:
-		// Late refinements that belong to a folder the user has
-		// already navigated away from are silently dropped — the gen
-		// check is the canonical cancellation mechanism. We also
-		// swallow per-row errors here: a failed classification just
-		// means the row keeps its generic design icon, which is the
-		// graceful-degradation we want.
-		if msg.gen != m.contentsGen || msg.err != nil {
+	case contentsClassifiedMsg:
+		// A page that belongs to a folder the user has already left is
+		// dropped — the gen check is the cancellation mechanism.
+		if msg.gen != m.contentsGen {
 			return m, nil
 		}
-		for i, it := range m.cols[colContents] {
-			if it.ID == msg.itemID {
-				if msg.isAssembly {
-					m.cols[colContents][i].Subtype = "assembly"
-				} else {
-					m.cols[colContents][i].Subtype = "part"
-				}
-				break
+		m.classify.inFlight = false
+		if msg.err != nil {
+			// The tags are decoration: the rows keep their generic
+			// design icon, and this folder is not asked again.
+			m.classify.done = true
+			return m, nil
+		}
+		byID := make(map[string]api.Classification, len(msg.rows))
+		for _, c := range msg.rows {
+			byID[c.ItemID] = c
+			m.classCache[c.ItemID] = c
+		}
+		for i := range m.cols[colContents] {
+			it := &m.cols[colContents][i]
+			if c, ok := byID[it.ID]; ok && it.Kind == "design" {
+				applyClassification(it, c)
 			}
 		}
-		return m, nil
+		m.classify.covered += msg.asked
+		m.classify.cursor = msg.next
+		if msg.next == "" {
+			m.classify.done = true
+		}
+		return m, m.classifyMore()
+
+	case detailsDueMsg:
+		item := m.selectedItem(m.activeCol)
+		if item == nil || item.IsContainer || item.ID != msg.itemID || !m.detailsLoading {
+			return m, nil // the cursor moved on
+		}
+		if _, ok := m.detailsCache[item.ID]; ok {
+			return m, nil
+		}
+		return m, loadDetailsCmd(m.token, m.selectedHubID, item.ID)
 
 	case contentsLoadedMsg:
 		m.loading[colContents] = false
@@ -952,11 +1076,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Fire assembly-vs-part classification for every DesignItem in
-		// the freshly-loaded items. Cmds run concurrently under
-		// tea.Batch; api.ClassifyAssembly's package-level semaphore
-		// caps real parallelism so we don't stampede the gateway.
-		classifyCmd := classifyContentsCmd(m.token, msg.items, m.contentsGen)
+		// Tag the designs near the cursor as assembly or part. The
+		// rest are tagged a page at a time as the cursor approaches.
+		classifyCmd := m.startClassify(msg.containerID, msg.isProject)
 
 		// Auto-load details for whatever item the cursor now points at.
 		// Without pendingNav this is index 0 (the original behavior);
@@ -981,12 +1103,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleItemLocation(msg)
 
 	case detailsLoadedMsg:
+		if msg.details != nil && msg.details.ID != "" {
+			m.detailsCache[msg.details.ID] = msg.details
+			// A response for a document the cursor has since left is
+			// kept for later but must not replace what is on screen.
+			if cur := m.selectedItem(m.activeCol); cur != nil && !cur.IsContainer && cur.ID != msg.details.ID {
+				return m, nil
+			}
+		}
 		m.detailsLoading = false
 		m.details = msg.details
 		m.detailsScroll = 0
-		if msg.details != nil && msg.details.ID != "" {
-			m.detailsCache[msg.details.ID] = msg.details
-		}
 		// Reset per-tab error/loading flags — they applied to the
 		// previous selection — and kick off a fetch for the active
 		// tab if it isn't Details and the new modelID isn't cached.
@@ -2071,15 +2198,36 @@ func (m *Model) maybeLoadDetails() tea.Cmd {
 		m.resetTabState()
 		return nil
 	}
+	more := m.classifyMore()
 	if cached, ok := m.detailsCache[item.ID]; ok && cached != nil {
 		m.details = cached
 		m.detailsLoading = false
 		m.resetTabState()
-		return m.maybeLoadActiveTab()
+		return batchCmds(m.maybeLoadActiveTab(), more)
 	}
 	m.detailsLoading = true
 	m.resetTabState()
-	return loadDetailsCmd(m.token, m.selectedHubID, item.ID)
+	id := item.ID
+	due := tea.Tick(detailsDelay, func(time.Time) tea.Msg { return detailsDueMsg{itemID: id} })
+	return batchCmds(due, more)
+}
+
+// batchCmds is tea.Batch that hands back a lone command as it is, so a
+// single command keeps its identity for callers and tests.
+func batchCmds(cmds ...tea.Cmd) tea.Cmd {
+	var live []tea.Cmd
+	for _, c := range cmds {
+		if c != nil {
+			live = append(live, c)
+		}
+	}
+	switch len(live) {
+	case 0:
+		return nil
+	case 1:
+		return live[0]
+	}
+	return tea.Batch(live...)
 }
 
 // openInBrowser opens the selected document's permalink in the default
@@ -2263,6 +2411,7 @@ func (m Model) selectedHubName() string {
 // [r] expects fresh data, not whatever was last cached).
 func (m Model) refresh() (Model, tea.Cmd) {
 	m.detailsCache = make(map[string]*api.ItemDetails)
+	m.classCache = make(map[string]api.Classification)
 	m.usesCache = make(map[string][]api.ComponentRef)
 	m.whereUsedCache = make(map[string][]api.ComponentRef)
 	m.drawingsCache = make(map[string][]api.DrawingRef)
@@ -2923,6 +3072,7 @@ func (m Model) recoverFromError() (Model, tea.Cmd) {
 	m.detailsLoading = false
 	m.detailsScroll = 0
 	m.detailsCache = make(map[string]*api.ItemDetails)
+	m.classCache = make(map[string]api.Classification)
 	m.statusMsg = ""
 	m.state = stateLoading
 	return m, tea.Batch(m.spinner.Tick, checkTokensCmd(m.clientID, m.clientSecret))
@@ -3032,6 +3182,11 @@ func (m Model) viewBrowser() string {
 	}
 	if m.statusMsg != "" {
 		headerParts += "  " + m.statusMsg
+	}
+	// Requests held back by the API's per-minute quota look like a
+	// hang otherwise; say what the wait is.
+	if _, paused, _ := api.Quota(); paused > 0 {
+		headerParts += fmt.Sprintf("  API rate limit reached, resuming in %ds", int(paused.Seconds())+1)
 	}
 	header := lipgloss.NewStyle().MaxWidth(m.width).Render(
 		styleHeader.Render(headerParts),

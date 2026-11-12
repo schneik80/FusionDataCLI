@@ -187,27 +187,23 @@ See [`docs/navigation.md`](navigation.md#tab-cursor-and-show-in-location) for th
 
 ### Async assembly-vs-part classification
 
-After the Contents column loads, each DesignItem is enriched with an "assembly" / "part" subtype derived from whether its tipRootModel has any direct assembly relations. The probe is dispatched in parallel under a `tea.Batch` and capped at 8 concurrent calls by a package-level semaphore in `api/classify.go`; each result flows back as an `itemClassifiedMsg` that mutates the matching row's `Subtype` in place. A `contentsGen` counter on the Model is incremented every time the Contents slice is replaced (folder drill, hub switch, project switch, refresh, recovery), and stale `itemClassifiedMsg`s whose gen no longer matches are dropped — late refinements can never stamp state onto a folder the user has already left.
+The Contents column is listed without any per-design data (that is what keeps a folder at 11 query points). Afterwards `api.ClassifyContents` tags one page of documents per request — model id plus a one-row `assemblyRelations` probe per design — and each answer arrives as a `contentsClassifiedMsg` that stamps `Subtype` and `RootModelID` onto the matching rows and into `classCache`. Pages are asked for only near the cursor: `classifyMore` runs after each page and on every cursor move, and requests the next page while the documents covered so far end within one page of the cursor. A `contentsGen` counter on the Model is incremented every time the Contents slice is replaced, and a page whose gen no longer matches is dropped.
 
 ```mermaid
 sequenceDiagram
     participant Update as Model.Update
-    participant Batch as tea.Batch (N cmds)
-    participant Sem as classifySem (cap 8)
+    participant API as api.ClassifyContents
     participant APS as APS GraphQL
 
-    Note over Update: contentsLoadedMsg lands<br/>m.contentsGen++<br/>gen = m.contentsGen
-    Update->>Batch: classifyContentsCmd(items, gen)<br/>one cmd per DesignItem
-    par 8 concurrent
-        Batch->>Sem: classifySem <- {}
-        Sem-->>Batch: slot acquired
-        Batch->>APS: model(modelId).assemblyRelations(depth:1, limit:1)
-        APS-->>Batch: { results: [] | [{...}] }
-        Batch-->>Update: itemClassifiedMsg{gen, itemID, isAssembly}
-    end
+    Note over Update: contentsLoadedMsg lands<br/>m.contentsGen++<br/>cached tags applied
+    Update->>API: classifyPageCmd(container, limit ≤ 50, cursor "", gen)
+    API->>APS: itemsBy…(limit) { … tipRootModel { id assemblyRelations(depth:1, limit:1) } }
+    APS-->>API: one page
+    API-->>Update: contentsClassifiedMsg{gen, rows, asked, next}
     Update->>Update: if msg.gen != m.contentsGen: drop
-    Update->>Update: else: m.cols[colContents][i].Subtype = "assembly"|"part"
-    Note over Update: View() re-renders that row<br/>with the new suffix
+    Update->>Update: stamp rows, cache, covered += asked
+    Update->>Update: classifyMore(): next page only if the cursor is near
+    Note over Update: cursor moves → classifyMore() again
 ```
 
 ---
@@ -220,8 +216,9 @@ The browser View() runs at spinner rate (~10 Hz) and re-renders every visible ro
 - **Per-tab caches** — `usesCache`, `whereUsedCache`, and `drawingsCache` each memoise their respective queries. Cache keys differ per relationship: Uses/WhereUsed for designs key on the tip root component-version id; Drawings keys on the design's lineage URN; Uses for drawings keys on the drawing's lineage URN. Hub change and refresh clear all of them; arrowing between items preserves them so a "scan Where Used across these designs" workflow doesn't refetch unchanged data.
 - **`styleCache`** — Lipgloss styles are value types but their rules clone on each chained `.Width(...).Foreground(...)` call. The width-applied variants used in `renderColumn` / `viewDetailsColumn` are precomputed and rebuilt only when terminal size or theme changes. The cache is shared by pointer because Bubble Tea passes the Model by value to View(); a local mutation on a copy would not persist. The rendered detail-panel lines are also cached and keyed on `m.details`'s pointer + width + theme version.
 - **Parallel project-contents fetch** — `loadProjectContentsCmd` issues `foldersByProject` and `itemsByProject` concurrently via `sync.WaitGroup` rather than sequentially. Wall-clock latency drops to roughly the slower of the two queries.
-- **Bounded-parallelism assembly classifier** — `api.ClassifyAssembly` calls run under a package-level `classifySem` buffered channel (size 8). A `tea.Batch` of 50 cmds dispatched from `contentsLoadedMsg` translates into at most 8 in-flight HTTPS round-trips against the gateway at a time; the rest queue on the semaphore. Wall-clock for a 50-item folder is roughly `ceil(N/8) × ~150 ms ≈ 1 s` vs the ~5 s a serial extended `itemsByFolder` query would cost.
-- **Contents generation guard** — `m.contentsGen` is incremented whenever the Contents slice is replaced. Async `itemClassifiedMsg`s carry the gen they were dispatched under; mismatches are dropped instead of mutating the new selection. This is the cancellation primitive that makes the classifier safe to fire-and-forget without per-cmd context cancellation plumbing.
+- **Lean lists, paged classification** — the document list costs 11 query points a page of 200; assembly/part tags are bought 50 documents a request and only near the cursor, and cached in `classCache` for the session. See [`throttling.md`](throttling.md).
+- **Details wait for the cursor to rest** — moving onto a document arms a 150 ms `detailsDueMsg`; the details are fetched only if the cursor is still there, and an answer for a document the cursor has left is cached but not shown.
+- **Contents generation guard** — `m.contentsGen` is incremented whenever the Contents slice is replaced. Async `contentsClassifiedMsg`s carry the gen they were dispatched under; mismatches are dropped instead of mutating the new selection. This is the cancellation primitive that makes the classifier safe to fire-and-forget without per-cmd context cancellation plumbing.
 
 ---
 
@@ -231,10 +228,14 @@ The APS Manufacturing Data Model GraphQL gateway (observed on the v2 endpoint; t
 
 `gqlQuery` (in `api/client.go`) wraps a single-shot `gqlQueryOnce` in a 3-attempt retry loop with backoffs `0 → 500 ms → 1.5 s`. Retry triggers are narrow:
 
-- Transport errors and HTTP `408` / `429` / `5xx` (server / network).
-- GraphQL `errors[]` carrying `extensions.errorType: "UNKNOWN"` (gateway's marker for intermittent upstream faults).
+- Transport errors and HTTP `408` / `5xx`.
+- GraphQL `errors[]` carrying `extensions.errorType: "UNKNOWN"` at or near the root, unless the code is one that describes the data (`EXCEPTION_CLOSED_COMMUNITY`, `FORBIDDEN`, …). `UNKNOWN` alone is not proof of a transient.
 
-HTTP `401` and concrete-typed GraphQL errors (`VALIDATION`, `BAD_USER_INPUT`, etc.) are surfaced immediately without retry. Total worst-case added latency is ~2 s, well inside the 30 s context that wraps every nav `tea.Cmd`. See [`docs/api.md`](api.md#error-handling-and-retry) for the decision-tree diagram. The full repro trace and defect-report template live outside the repo at `~/Documents/aps-mfg-graphql-flakiness.md` for filing with APS.
+HTTP `401`, errors that null the root field, and deterministic codes are surfaced immediately. An error that leaves the root field intact passes the data through. See [`docs/api.md`](api.md#error-handling-and-retry) for the table.
+
+## Resilience — the per-minute query quota
+
+HTTP `429` is not flakiness and is not retried on that schedule. `api/throttle.go` keeps a pause shared by every request (5 s, growing to 20 s for consecutive refusals), a meter of the points spent in the last minute, and a budget that holds background requests while the minute is mostly spent. A throttled request waits and is sent again for as long as its context allows; the header shows the wait. See [`docs/throttling.md`](throttling.md).
 
 ---
 
@@ -273,7 +274,8 @@ FusionDataCLI/
 │   ├── queries.go           Hierarchy queries — GetHubs/Projects/Folders/Items; allPages() pagination;
 │   │                        items queries pull tipRootModel.id inline for designs so the
 │   │                        async classifier can probe relations without a second round-trip
-│   ├── classify.go          ClassifyAssembly(modelID) + classifySem semaphore (cap 8 concurrent)
+│   ├── classify.go          ClassifyContents: assembly/part tags and model ids, one page per request
+│   ├── throttle.go          per-minute quota: shared 429 pause, point meter, background budget
 │   ├── details.go           GetItemDetails(), ItemDetails, VersionSummary, parseTime()
 │   ├── refs.go              Cross-reference queries: GetOccurrences, GetWhereUsed,
 │   │                        GetDrawingsForDesign, GetDrawingSource (Uses/WhereUsed/Drawings tabs)

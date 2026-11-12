@@ -33,7 +33,7 @@ v3 removes `ComponentVersion`, `DrawingVersion`, and the item-version objects. A
 | `GetHubs`, `GetFolders`, `GetItemLocation` | — | unchanged |
 | `GetProjects` | `projectType` requested | dropped (deprecated — every project is `FOLDER_LEVEL`) |
 | `GetItems`, `GetProjectItems` | `tipRootComponentVersion { id }` | `tipRootModel { id }` |
-| `ClassifyAssembly` | `componentVersion.occurrences(limit: 1)` | `model.assemblyRelations(depth: 1, limit: 1)` |
+| `ClassifyAssembly` (since replaced by `ClassifyContents`, see [throttling.md](throttling.md)) | `componentVersion.occurrences(limit: 1)` | `model.assemblyRelations(depth: 1, limit: 1)` |
 | `GetOccurrences` (Uses) | `componentVersion.occurrences` | `model.assemblyRelations(depth: 1)` → `toModel` |
 | `GetWhereUsed` | `componentVersion.whereUsed`, deduped per parent design | `item.whereUsed`; signature now takes `hubID, itemID` |
 | `GetDrawingsForDesign` | walk `versions` → `drawingItemVersions`, dedupe | `DesignItem.drawingItems` |
