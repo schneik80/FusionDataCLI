@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,7 +30,16 @@ func main() {
 		}
 	}()
 
+	report := registerReportFlags(flag.CommandLine)
+	flag.Parse()
+
 	cfg, cfgErr := config.Load()
+
+	// -mfgdm-report is a batch command: no TUI, progress on stderr, a
+	// Markdown file as the result.
+	if report.run {
+		os.Exit(runReport(report, cfg, cfgErr))
+	}
 
 	p := tea.NewProgram(
 		ui.New(cfg, cfgErr, version),

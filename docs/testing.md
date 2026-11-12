@@ -61,7 +61,10 @@ graph TD
 | `fusion` | 75% | 84.2% |
 | `api` | 65% | ~70% |
 | `pins` | 70% | ~85% |
+| `audit` | — | ~87% |
 | `ui` | 30% | ~40% |
+
+`audit` (the `-mfgdm-report` crawler) is tested against an in-memory fake hub (`audit/fake_test.go`) that answers the crawler's aliased queries, enforces the API's 1000-points-per-query limit and a points-per-minute quota, and injects 429s, 5xx, failing lists, null rows and forbidden folders. It runs on a fake clock, so pacing and backoff tests take no real time. The key test, `TestCrawl_ThrottlingLosesNothing`, crawls the same hub with and without throttling and requires identical findings.
 
 UI is intentionally lower because View() rendering is exercised by humans; the L3 tests cover the state-machine transitions that *drive* View() but don't assert on the styled output. Don't chase UI coverage by writing pixel-snapshot tests — they break on every theme tweak and don't catch logic bugs.
 

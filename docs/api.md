@@ -753,6 +753,19 @@ If the call is still failing after 3 attempts, the wrapped error reads `APS Grap
 
 ---
 
+### Query points and the per-minute quota
+
+Every query has a point value, reported in `extensions.pointValue.requestedQueryPointValue`. Two limits apply:
+
+- **Per query: 1000 points.** A list costs 11 points whatever its page size. Selecting an object under each result (a design's `tipRootModel`, say) adds about 5 points per row *asked for* — the page size, not what comes back. Nested lists multiply.
+- **Per minute.** Once a minute's points are spent the API answers **HTTP 429** with `Query point value per minute quota exceeded with point value of N and remaining quota M`. On the test account the quota behaved like 10,000 points a minute. There was no `Retry-After` header. The counter punishes bursts: a client that spent 8,000 points, waited out the minute and spent 8,000 more was still throttled, so the audit spends at a steady rate instead.
+
+Interactive browsing stays far below the per-minute quota. `gqlQuery` retries a 429 three times with short backoffs and then surfaces the error.
+
+### QueryRaw — one round-trip, nothing hidden
+
+`gqlQuery` passes partial data through and drops the accompanying errors. That is right for a list on screen and wrong for anything that must account for every row. `api.QueryRaw` performs exactly one request and returns the HTTP status, `Retry-After`, the data, every error with its path, code and correlation id, and the point value. It makes no retry; the caller owns that policy. The hub audit (`audit/`, see [mfgdm-report.md](mfgdm-report.md)) is built on it.
+
 ## Debug Mode
 
 Set `APSNAV_DEBUG=1` before running to enable full request/response logging:

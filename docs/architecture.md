@@ -257,6 +257,7 @@ The full `go test -race ./...` suite finishes in under five seconds. CI (`.githu
 ```
 FusionDataCLI/
 ├── main.go                  Entry point + deferred recover(); writes ~/.config/fusiondatacli/panic.log
+├── report_cmd.go            -mfgdm-report: flags, sign-in, hub selection, writes the report file
 │
 ├── config/
 │   └── config.go            Config struct, Load(), Dir(), Path(), DefaultClientID
@@ -278,8 +279,15 @@ FusionDataCLI/
 │   │                        GetDrawingsForDesign, GetDrawingSource (Uses/WhereUsed/Drawings tabs)
 │   ├── locate.go            GetItemLocation — project + folder ancestry walk for Show in Location
 │   ├── download.go          RequestSTEPDerivative(), DownloadFile(), StepDownloadPath()
+│   ├── raw.go               QueryRaw() — one round-trip returning status, Retry-After, data and
+│                            every error; the audit's API call (no retry, nothing dropped)
 │   └── debug.go             dbgLog (in-memory ring + debug.log file + stderr if redirected),
 │                            DebugLines(), DebugEnabled(), DebugLogPath()
+│
+├── audit/                   Hub-wide MFGDM data report (see docs/mfgdm-report.md)
+│   ├── crawl.go             Batched walk of every project / folder / document; rechecks; re-counts
+│   ├── requester.go         Point-budget pacing, 429 handling, retries, token refresh
+│   └── report.go            WriteMarkdown()
 │
 ├── pins/
 │   └── pins.go              Hub-scoped bookmark storage (~/.config/fusiondatacli/pins-<hubID>.json);

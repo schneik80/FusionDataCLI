@@ -115,6 +115,16 @@ If the home directory cannot be determined the file is written to `os.TempDir()`
 
 `shift+d` is only valid on `DesignItem` rows that have a `tipRootModel` — drawings (`DrawingItem`), configured designs (`ConfiguredDesignItem`), folders, and projects are not supported by the derivatives endpoint. Pressing `shift+d` on those rows is a no-op with a status-bar hint. A second `shift+d` press while a download is already in flight is also rejected so polls don't pile up.
 
+### MFGDM data report
+
+To audit a whole hub for documents and folders that are missing Manufacturing Data Model data, run the report command instead of the browser:
+
+```sh
+fusiondatacli -mfgdm-report -hub "My Hub"
+```
+
+It walks every project, folder and document, and writes `mfgdm-report-<hub>-<timestamp>.md` with every affected document and folder, their ids, and summary statistics. It paces itself under the API's per-minute quota and retries anything throttled, so a slow run does not lose data. See [`docs/mfgdm-report.md`](docs/mfgdm-report.md).
+
 ### Non-US hubs
 
 If your Fusion hub is in EMEA or Australia, set the region before running:
@@ -174,6 +184,7 @@ APS_CLIENT_ID=your-client-id ./fusiondatacli
 |---|---|
 | [`docs/navigation.md`](docs/navigation.md) | Three-column browser, details-pane tabs, Show in Location, mouse, themes |
 | [`docs/api.md`](docs/api.md) | APS Manufacturing Data Model GraphQL queries, retry behaviour, debug logging |
+| [`docs/mfgdm-report.md`](docs/mfgdm-report.md) | The `-mfgdm-report` hub audit: flags, findings, accuracy and throttling |
 | [`docs/authentication.md`](docs/authentication.md) | OAuth PKCE flow, token storage, refresh |
 | [`docs/architecture.md`](docs/architecture.md) | C4 diagrams, package layout, data flow, performance, resilience |
 | [`docs/debugging.md`](docs/debugging.md) | **Reporting a bug** — what to capture and how to file it |
