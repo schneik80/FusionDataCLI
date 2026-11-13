@@ -488,18 +488,12 @@ Returns `[]ComponentRef` — one row per direct child instance. This is *instanc
 
 `depth: 1` is load-bearing. `assemblyRelations` defaults to the **whole tree**: on the 4WD-buggy test assembly the default returned 413 relations across 42 parent models, where `depth: 1` returned the 41 direct children — the same 41 that v2 `occurrences` returned.
 
-### GetWhereUsed — items that reference this design
+### GetWhereUsed — the design's direct parents
 
 ```graphql
 query GetWhereUsed($hubId: ID!, $itemId: ID!) {
   item(hubId: $hubId, itemId: $itemId) {
-    ... on DesignItem {                       # this design's own drawings
-      drawingItems(pagination: { limit: 50 }) {
-        pagination { cursor }
-        results { id }
-      }
-    }
-    whereUsed(pagination: { limit: 25 }) {
+    whereUsed(pagination: { limit: 10 }) {    # 25 on later pages
       pagination { cursor }
       results {
         __typename id name
@@ -510,21 +504,16 @@ query GetWhereUsed($hubId: ID!, $itemId: ID!) {
             materialName { value }
             component { partNumber { value } description { value } }
           }
-          whereUsed(pagination: { limit: 25 }) {   # the row's own parents
-            pagination { cursor }
-            results { __typename }
-          }
         }
         ... on ConfiguredDesignItem { fusionWebUrl }
-        ... on DrawingItem { fusionWebUrl }
       }
     }
   }
 }
 
-# GetWhereUsedRelations: one request for all design rows (up to 25 per
-# request), to label each direct or indirect; p0, p1, … are the
-# parents' root models
+# One request for all design rows (up to 25 per request), to find which
+# of them hold the design at their first level; p0, p1, … are the rows'
+# root models
 query WhereUsedIsDirect($m0: ID!, $m1: ID!) {
   p0: model(modelId: $m0) {
     assemblyRelations(scope: INTERNAL_PLUS_DIRECT_EXTERNAL, pagination: { limit: 250 }) {
@@ -536,33 +525,27 @@ query WhereUsedIsDirect($m0: ID!, $m1: ID!) {
 }
 ```
 
-Where-used moved from the component version to the **item** (`Item.whereUsed`), so the lookup takes `hubId` + `itemId`. Results are `Item`s, one per referencing item — the v2 "one row per saved version of each parent" duplication is gone, and the function only dedupes defensively across page boundaries.
+The tab shows **direct parents only**: the designs that hold the selected design at their own first level.
 
-Two behaviour changes from v2, both visible in the tab:
+Where-used moved from the component version to the **item** (`Item.whereUsed`), so the lookup takes `hubId` + `itemId`. The schema describes `whereUsed` as "the immediate parents in which this item is used", but on live data it returns much more, and nothing in the response says which row is which:
 
-- **Drawings are results too.** A drawing that documents an assembly containing the design is returned as a `DrawingItem`. `ComponentRef.Kind` (`design` / `configured` / `drawing`) carries the type and the row is tagged `drawing`.
-- **Indirect parents are included.** The schema describes `whereUsed` as "the immediate parents in which this item is used", but on live data it also returns assemblies that contain the design only through a sub-assembly. v2 returned the direct parent only. There is no field that distinguishes direct from indirect.
+- every assembly above the design, however many levels up;
+- drawings, of the design and of those assemblies;
+- documents whose current version no longer references the design (older-version users, hidden wrapper documents around imported files).
 
-Because the response does not say which rows are which, the app works it out. The load is split in two so the tab does not wait for the slower half:
+So `GetWhereUsed` runs both queries and filters. Measured on the test hub: a shock shaft for which the API lists 7 designs and a drawing comes back as its 2 direct parents.
 
-1. **`GetWhereUsed`** returns the rows. Drawing rows are already tagged, and `Root` is set; design rows have an empty `Relation` and their `RootModelID` filled in.
-2. **`GetWhereUsedRelations`** takes those rows and returns a new list with the design rows tagged and the whole list re-sorted direct first. The UI caches and shows the rows from step 1, fires step 2 only if `NeedsWhereUsedRelations` says a design row is waiting, and swaps the tagged list in when it lands (the cursor follows the row it was on). On the test hub the rows appear after about 4 s and the tags about 1.5 s later.
+- **Drawings are dropped.** The design's drawings are on the Drawings tab (`GetDrawingsForDesign`); a drawing of an assembly further up is not a use of this design.
+- **Design rows are checked.** A single `WhereUsedIsDirect` request reads every listed design's first-level references, each under its own alias, and looks for this item. `scope: INTERNAL_PLUS_DIRECT_EXTERNAL` returns the design's internal components plus the external designs inserted into them, without descending into those designs. A request takes over a second however little it asks, so seven rows batched cost about what one does alone. Each row scores 12 query points; batches hold 25. The page size is 250, the API maximum, which costs the same as 50; a design with more references than that and no match yet goes round again with its cursor.
+- **Kept, `Relation: direct`:** the item is among the design's first-level references.
+- **Dropped:** a design that has references but not this item at their first level (an ancestor further up), and a design whose current version references nothing at all.
+- **Kept, `Relation` empty (shown as `unconfirmed`):** a row that could not be checked, so that a failed check never hides a real parent. That is a design whose references cannot be read (a damaged document answers `DATA_HAS_ERROR`, beside the others' answers; the request is not repeated), every design row when the relation request itself fails, and configured designs, which are not asked. Only a batch the API refuses outright is asked again one row at a time.
 
-**`Relation`** is `direct`, `indirect`, or empty if undetermined.
+The result reflects what the signed-in user can see: a parent in a project they cannot read is not returned by `whereUsed`.
 
-- *Drawing rows* are decided by the design's own `drawingItems` list, the same field the Drawings tab reads, so the two tabs cannot disagree: a drawing in that list is direct, any other is a drawing of an assembly further up and is indirect. No extra request. If the design has more than one page of drawings, a drawing missing from the first page is left untagged. The check deliberately does not ask each drawing for `tipDrawing.model`: that field is an internal server error on some drawings.
-- *Design rows:* a single `WhereUsedIsDirect` request reads every parent's first-level references, each parent under its own alias, and looks for this item. `scope: INTERNAL_PLUS_DIRECT_EXTERNAL` returns the parent's internal components plus the external designs inserted into them, without descending into those designs. A request takes over a second however little it asks, so seven parents batched cost about what one does alone (measured: ~1.4 s batched, ~10.5 s one after another). Each parent scores 12 query points; batches hold 25. The page size is 250, the API maximum, which costs the same as 50 and avoids a second round for large parents; a parent with more references than that and no match yet goes round again with its cursor. A parent whose references cannot be read (a damaged document answers `DATA_HAS_ERROR`) comes back null beside the others and alone gets an empty `Relation`; the request is not repeated. Only a batch the API refuses outright is asked again one parent at a time, and one that timed out or kept failing transiently leaves its parents untagged instead of failing the tab.
-- *Indirect is an inference, not a traced path.* It means the API lists the design as a user of this item, its current version has references, and this item is not at their first level. The route through the sub-assembly is not walked.
-- *Parents that reference nothing.* `whereUsed` also lists designs whose current version has no references at all — on live data, documents that used the item in an older version and hidden wrapper documents around imported files. Such a design cannot hold the item through a sub-assembly, so it is left untagged and loses `Root`.
-- *Configured-design rows* are not checked; `Relation` stays empty.
+`whereUsed` can also return an item the API cannot read (every field null, with an internal server error on that result). It has no model to check, so it is listed as `unconfirmed` with the name `(unnamed item)`.
 
-**`Root`** is true for a design row that no other design uses: the top of a parent chain. It comes from the nested `whereUsed` on each `DesignItem` row: a row is a root when that list holds no design (drawings do not count). It is left false when the nested list has a cursor, because a truncated list proves nothing. The nested field is only selected on `DesignItem`; selecting it on a `DrawingItem` is a `BAD_REQUEST`. The UI shows the `root` tag only on a row that also has a `Relation`, so it is never claimed for a row not confirmed as a current parent. A design used by two unrelated top-level assemblies gets two root rows.
-
-`Root` reflects what the signed-in user can see: a parent in a project they cannot read is not returned by `whereUsed`, so the row below it would be reported as a root.
-
-`whereUsed` can also return an item the API cannot read (every field null, with an internal server error on that result). The row is kept and shown as `(unnamed item)`.
-
-The page size is 25, not 50: the nested selections under each result score ~800 of the 1000-point budget at 25.
+**Cost and latency.** The first page asks for 10 rows and costs 211 points (was 327 with the nested lookups for drawing and root tags); later pages ask for 25. The upstream lookup is slow — 5 to 20 s for a design with several ancestors — and about one time in three answers a path-less `INTERNAL_SERVER_ERROR`, sometimes with part of the rows. That answer is treated as transient and asked again; the partial rows are never used. The tab's load has its own 90 s timeout for that reason.
 
 ### GetDrawingsForDesign — Drawings tab on a DesignItem
 

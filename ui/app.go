@@ -112,9 +112,6 @@ type (
 	// state for the new selection.
 	usesLoadedMsg      struct{ modelID string; items []api.ComponentRef; err error }
 	whereUsedLoadedMsg struct{ modelID, itemID string; items []api.ComponentRef; err error }
-	// whereUsedRelationsMsg follows a whereUsedLoadedMsg with the same
-	// rows, now tagged direct / indirect and re-sorted.
-	whereUsedRelationsMsg struct{ modelID string; items []api.ComponentRef }
 	// drawingsLoadedMsg key is the DesignItem.id (lineage URN), not a
 	// root-model id — drawings hang off the design item itself,
 	// so we cache by the stable item identity.
@@ -760,29 +757,20 @@ func loadDrawingUsesCmd(token, hubID, drawingItemID string) tea.Cmd {
 	}
 }
 
-// loadWhereUsedCmd fetches the items that reference a design. The
-// lookup itself is by hub + item id; modelID is only the cache key, so
-// the result lands next to the design's Uses entry.
+// whereUsedTimeout bounds a Where Used load. The upstream lookup takes
+// 5–20 s for a design with several ancestors and fails about one time in
+// three, so the usual navigation timeout would end it mid-retry.
+const whereUsedTimeout = 90 * time.Second
+
+// loadWhereUsedCmd fetches the direct parents of a design. The lookup
+// itself is by hub + item id; modelID is only the cache key, so the
+// result lands next to the design's Uses entry.
 func loadWhereUsedCmd(token, hubID, itemID, modelID string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), whereUsedTimeout)
 		defer cancel()
 		items, err := api.GetWhereUsed(ctx, token, hubID, itemID)
 		return whereUsedLoadedMsg{modelID: modelID, itemID: itemID, items: items, err: err}
-	}
-}
-
-// loadWhereUsedRelationsCmd is the follow-up to loadWhereUsedCmd. The
-// rows are already on screen; this works out which design rows hold the
-// item directly and which only through a sub-assembly.
-func loadWhereUsedRelationsCmd(token, itemID, modelID string, items []api.ComponentRef) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), navRequestTimeout)
-		defer cancel()
-		return whereUsedRelationsMsg{
-			modelID: modelID,
-			items:   api.GetWhereUsedRelations(ctx, token, itemID, items),
-		}
 	}
 }
 
@@ -1170,14 +1158,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tabErr[tabWhereUsed] = ""
 			}
 		}
-		// Rows are shown now; the direct / indirect tags follow.
-		if msg.err == nil && api.NeedsWhereUsedRelations(msg.items) {
-			return m, loadWhereUsedRelationsCmd(m.token, msg.itemID, msg.modelID, msg.items)
-		}
-		return m, nil
-
-	case whereUsedRelationsMsg:
-		m.applyWhereUsedRelations(msg.modelID, msg.items)
 		return m, nil
 
 	case drawingsLoadedMsg:
@@ -1690,38 +1670,6 @@ func (m *Model) moveTabCursor(delta int) {
 	} else if cur >= scroll+visible {
 		m.tabScrolls[m.detailsTab] = cur - visible + 1
 	}
-}
-
-// applyWhereUsedRelations swaps the tagged, re-sorted Where Used rows
-// in for the untagged ones already cached. Tagging re-orders the list
-// (direct rows first), so if this design's Where Used tab has a row
-// selected below the first, the cursor follows it to its new position.
-func (m *Model) applyWhereUsedRelations(modelID string, items []api.ComponentRef) {
-	old, ok := m.whereUsedCache[modelID]
-	if !ok || len(old) != len(items) {
-		// The cache was reset or replaced while the tags were loading.
-		return
-	}
-	m.whereUsedCache[modelID] = items
-	if m.details == nil || m.details.RootModelID != modelID {
-		return
-	}
-	// A cursor still on the first row has not been moved; leave it at
-	// the top, where the direct rows now are. Likewise if the tab is not
-	// the one showing.
-	cur := m.tabCursors[tabWhereUsed]
-	if cur <= 0 || cur >= len(old) || m.detailsTab != tabWhereUsed {
-		m.tabCursors[tabWhereUsed] = 0
-		m.tabScrolls[tabWhereUsed] = 0
-		return
-	}
-	for i, r := range items {
-		if r.ID == old[cur].ID {
-			m.tabCursors[tabWhereUsed] = i
-			break
-		}
-	}
-	m.moveTabCursor(0) // re-clamp the scroll around the cursor
 }
 
 // moveCursor moves the cursor in the active column and adjusts scroll.
@@ -3570,7 +3518,7 @@ func (m Model) tabContentLines(width, visibleH int, sc *styleCache) []string {
 			return []string{sc.itemDimDetails.Render("(not loaded)")}
 		}
 		if len(items) == 0 {
-			return []string{sc.itemDimDetails.Render("Not referenced by any other design or drawing")}
+			return []string{sc.itemDimDetails.Render("Not used in any other design")}
 		}
 		return componentRefLines(items, cursor, scroll, visibleH, width)
 	case tabDrawings:
@@ -3609,19 +3557,10 @@ func componentRefLines(refs []api.ComponentRef, cursor, scroll, visibleH, width 
 		if r.PartNumber != "" && r.PartNumber != head {
 			tags = append(tags, r.PartNumber)
 		}
-		// Where Used mixes drawings in with the referencing designs.
-		if r.Kind == "drawing" {
-			tags = append(tags, "drawing")
-		}
-		// Where Used also lists assemblies that only reach the design
-		// through a sub-assembly; say which rows are which.
-		if r.Relation != "" {
-			tags = append(tags, r.Relation)
-		}
-		// The top of a parent chain: a design nothing else uses. Only
-		// claimed once the row is confirmed as a current parent.
-		if r.Root && r.Relation != "" {
-			tags = append(tags, "root")
+		// Where Used lists direct parents. A row that could not be
+		// confirmed as one is listed too, and says so.
+		if r.Kind != "" && r.Relation == "" {
+			tags = append(tags, "unconfirmed")
 		}
 		primary := styleItemNormal
 		if i == cursor {

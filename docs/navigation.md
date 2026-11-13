@@ -496,7 +496,7 @@ For documents the details column has a tab strip that swaps the body between fou
 | **Details** | Eagerly fetched the moment an item is selected; no extra round trip on activation | item ID | `GetItemDetails` |
 | **Uses** (DesignItem) | The direct children (depth-1 assembly relations) of the design's tip root model, one row per instance | `tipRootModel.id` | `GetOccurrences` |
 | **Uses** (DrawingItem) | The model (and its owning design) documented by the drawing's tip drawing | drawing item ID | `GetDrawingSource` |
-| **Where Used** | Items that reference the design: parent assemblies — including ones that contain it indirectly through a sub-assembly — and drawings, which are tagged `drawing` in the row. Rows appear first; a moment later each is tagged `direct` or `indirect` and the list re-sorts direct first. A design that nothing else uses is tagged `root` | `tipRootModel.id` | `GetWhereUsed` |
+| **Where Used** | The design's direct parents: the designs that hold it at their own first level. Assemblies further up and drawings are not listed (drawings have their own tab). A row that could not be confirmed as a direct parent is listed and tagged `unconfirmed` | `tipRootModel.id` | `GetWhereUsed` |
 | **Drawings** | Drawing items that reference the design (`DesignItem.drawingItems`), sorted by latest modification first | design item ID | `GetDrawingsForDesign` |
 
 ### Tab cursor and Show in Location

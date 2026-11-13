@@ -271,3 +271,28 @@ func TestGqlQuery_RegionHeader(t *testing.T) {
 		})
 	}
 }
+
+// TestGqlQuery_PathlessInternalErrorIsRetried: the v3 item service
+// answers a slow whereUsed with a path-less INTERNAL_SERVER_ERROR and no
+// errorType, sometimes beside part of the rows. It is asked again, and
+// the partial rows are never used.
+func TestGqlQuery_PathlessInternalErrorIsRetried(t *testing.T) {
+	fakeQuota(t)
+	prev := retryBackoffs
+	retryBackoffs = []time.Duration{0, 0, 0}
+	t.Cleanup(func() { retryBackoffs = prev })
+	calls := serve(t, func(n int32, w http.ResponseWriter) {
+		if n == 1 {
+			_, _ = io.WriteString(w, `{"data":{"item":{"whereUsed":{"results":[{"id":"half"}]}}},"errors":[{"message":"Internal Server Error. You may contact support with your correlation-id","path":[],"extensions":{"code":"INTERNAL_SERVER_ERROR","service":"mfgdm-item"}}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":{"item":{"whereUsed":{"results":[{"id":"whole"}]}}}}`)
+	})
+	raw, err := gqlQuery(context.Background(), "tok", "query Q {}", nil)
+	if err != nil {
+		t.Fatalf("gqlQuery: %v", err)
+	}
+	if calls.Load() != 2 || !strings.Contains(string(raw), "whole") {
+		t.Errorf("calls = %d data = %s, want the second answer", calls.Load(), raw)
+	}
+}

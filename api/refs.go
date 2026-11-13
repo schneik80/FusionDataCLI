@@ -15,8 +15,8 @@ import (
 //
 //   - Uses on a design: a direct child Model of the design's root model.
 //   - Uses on a drawing: the Model the drawing documents.
-//   - Where Used: an Item (design, configured design, or drawing) that
-//     references the selected design.
+//   - Where Used: a design (or configured design) that holds the
+//     selected design at its own first level — a direct parent.
 type ComponentRef struct {
 	ID             string // Model.id (Uses) or Item.id (Where Used)
 	Name           string
@@ -26,31 +26,22 @@ type ComponentRef struct {
 	DesignItemID   string // owning Item.id — the Show-in-Location target
 	DesignItemName string // owning Item.name
 	FusionWebURL   string // owning Item.fusionWebUrl, if exposed
-	// Kind is set on Where Used rows, where the referencing item is not
-	// necessarily a design: "design" | "configured" | "drawing" |
+	// Kind is set on Where Used rows: "design" | "configured" |
 	// "unknown". Empty on Uses rows.
 	Kind string
-	// Relation is set on Where Used rows: RelationDirect when the item
-	// references the selected design itself, RelationIndirect when it only
-	// reaches it through a sub-assembly (or, for a drawing, documents such
-	// an assembly). Empty when that could not be determined.
+	// Relation is set on Where Used rows: RelationDirect once the row is
+	// confirmed to hold the selected design at its first level. Empty
+	// when that could not be checked (see GetWhereUsed); such a row is
+	// listed anyway, so that a parent is never hidden by a failed check.
 	Relation string
-	// Root is set on Where Used rows for a design that is itself used by
-	// no other design: the top of a parent chain. It is only set when the
-	// API's answer for that row was complete; false means "not a root or
-	// not known".
-	Root bool
-	// RootModelID is set on Where Used design rows: the referencing
-	// design's tipRootModel id, which GetWhereUsedRelations needs. A
-	// design row with this set and Relation empty has not been checked
-	// yet, or its check failed.
-	RootModelID string
 }
 
-// Where Used relation values.
+// Where Used relation values. Only direct rows (and rows that could not
+// be checked) are returned; indirect is the internal verdict that drops
+// a row.
 const (
 	RelationDirect   = "direct"
-	RelationIndirect = "indirect"
+	relationIndirect = "indirect"
 )
 
 // DrawingRef describes a drawing shown in the Drawings tab.
@@ -65,9 +56,9 @@ type DrawingRef struct {
 	FusionWebURL  string
 }
 
-// refsPageSize is the page-size hint for the Where Used query, and for
-// the where-used list nested under each of its design rows. With both
-// at 25 the query scores ~800 of the 1000-point budget; 50 is over.
+// refsPageSize is the page-size hint for the Where Used query after its
+// first page. It matches relationBatchSize, so a page of rows is one
+// relation request.
 const refsPageSize = 25
 
 // propValue is the v3 Property wrapper around name / partNumber /
@@ -233,38 +224,33 @@ func GetDrawingSource(ctx context.Context, token, hubID, drawingItemID string) (
 	return []ComponentRef{ref}, nil
 }
 
-// GetWhereUsed returns the items that reference the given design (the
-// reverse-lookup "Where Used" relationship).
+// GetWhereUsed returns the direct parents of the given design: the
+// designs that hold it at their own first level (the reverse-lookup
+// "Where Used" relationship).
 //
-// Two things differ from the v2 ComponentVersion.whereUsed this
-// replaced:
+// The API's Item.whereUsed lists far more than that. On live data it
+// returns every assembly above the design, however many levels up, the
+// drawings of the design and of those assemblies, and documents that
+// used the design in an older version. Nothing in the response says
+// which is which, so this runs in two steps:
 //
-//   - Results are Items, not component versions, so there is one row per
-//     referencing item with no per-version duplicates to collapse.
-//   - Drawings come back alongside designs, and on live data the list
-//     includes assemblies that contain the design indirectly (through a
-//     sub-assembly), not only its immediate parents. Kind lets the UI
-//     tell the row types apart.
+//  1. The whereUsed list. Drawings are dropped here: the design's
+//     drawings have their own tab (GetDrawingsForDesign), and a drawing
+//     of an assembly further up is not a use of this design.
+//  2. One request reading each listed design's own first-level
+//     references (directRelations). A design is kept when the selected
+//     one is among them.
 //
-// Nothing in the whereUsed response separates direct from indirect, so
-// Relation is worked out separately:
+// What is returned besides confirmed parents (Relation RelationDirect):
+// a row that could not be checked keeps an empty Relation and is listed
+// too — a design whose references could not be read (damaged data, or
+// the relation request failed), and a configured design, which is not
+// asked. Hiding those could hide a real parent.
 //
-//   - A drawing is direct when it is one of this design's own drawings,
-//     and indirect when it documents an assembly further up. The design's
-//     DesignItem.drawingItems list — the same field the Drawings tab
-//     reads — rides along on this query and decides it, so the two tabs
-//     cannot disagree. (Asking each drawing for tipDrawing.model instead
-//     is not reliable: that field is an internal server error on some
-//     drawings, which would leave them untagged.)
-//   - A design needs a look at its own first-level references. That is a
-//     second request, so it is not made here: design rows come back with
-//     Relation empty and RootModelID set, and GetWhereUsedRelations
-//     fills them in. The caller can show the rows in the meantime.
+// What is dropped: indirect ancestors, and designs whose current
+// version references nothing at all (see relationNone).
 //
-// Root marks the end of a parent chain. Each design row carries its own
-// whereUsed list, and a design with no design in that list has no
-// parent. The flag is left unset when that nested list was cut short by
-// paging, and for configured designs, which are not asked.
+// An error is returned only when the list itself could not be read.
 func GetWhereUsed(ctx context.Context, token, hubID, itemID string) ([]ComponentRef, error) {
 	const body = `{
 					pagination { cursor }
@@ -277,13 +263,8 @@ func GetWhereUsed(ctx context.Context, token, hubID, itemID string) ([]Component
 								materialName { value }
 								component { partNumber { value } description { value } }
 							}
-							whereUsed(pagination: { limit: %[3]d }) {
-								pagination { cursor }
-								results { __typename }
-							}
 						}
 						... on ConfiguredDesignItem { fusionWebUrl }
-						... on DrawingItem { fusionWebUrl }
 					}
 				}
 			}
@@ -291,17 +272,11 @@ func GetWhereUsed(ctx context.Context, token, hubID, itemID string) ([]Component
 	qFirst := fmt.Sprintf(`
 		query GetWhereUsed($hubId: ID!, $itemId: ID!) {
 			item(hubId: $hubId, itemId: $itemId) {
-				... on DesignItem {
-					drawingItems(pagination: { limit: %[2]d }) {
-						pagination { cursor }
-						results { id }
-					}
-				}
-				whereUsed(pagination: { limit: %[1]d }) `+body, firstPageSize, pageSize, refsPageSize)
+				whereUsed(pagination: { limit: %d }) `, firstPageSize) + body
 	qNext := fmt.Sprintf(`
 		query GetWhereUsedNext($hubId: ID!, $itemId: ID!, $cursor: String!) {
 			item(hubId: $hubId, itemId: $itemId) {
-				whereUsed(pagination: { cursor: $cursor, limit: %[1]d }) `+body, refsPageSize, pageSize, refsPageSize)
+				whereUsed(pagination: { cursor: $cursor, limit: %d }) `, refsPageSize) + body
 
 	type itemRef struct {
 		Typename     string `json:"__typename"`
@@ -316,34 +291,12 @@ func GetWhereUsed(ctx context.Context, token, hubID, itemID string) ([]Component
 				Description *propValue `json:"description"`
 			} `json:"component"`
 		} `json:"tipRootModel"`
-		// The row's own parents; only requested on DesignItem.
-		WhereUsed *struct {
-			Pagination struct {
-				Cursor string `json:"cursor"`
-			} `json:"pagination"`
-			Results []struct {
-				Typename string `json:"__typename"`
-			} `json:"results"`
-		} `json:"whereUsed"`
 	}
-
-	// ownDrawings is this design's drawings, from the first page only;
-	// ownDrawingsComplete says whether that list is the whole set.
-	ownDrawings := map[string]bool{}
-	ownDrawingsComplete := false
 
 	vars := map[string]any{"hubId": hubID, "itemId": itemID}
 	all, err := allPages(ctx, token, qFirst, qNext, vars, func(data json.RawMessage) (string, []itemRef, error) {
 		var r struct {
 			Item struct {
-				DrawingItems *struct {
-					Pagination struct {
-						Cursor string `json:"cursor"`
-					} `json:"pagination"`
-					Results []struct {
-						ID string `json:"id"`
-					} `json:"results"`
-				} `json:"drawingItems"`
 				WhereUsed struct {
 					Pagination struct {
 						Cursor string `json:"cursor"`
@@ -355,12 +308,6 @@ func GetWhereUsed(ctx context.Context, token, hubID, itemID string) ([]Component
 		if err := json.Unmarshal(data, &r); err != nil {
 			return "", nil, fmt.Errorf("whereUsed: %w", err)
 		}
-		if d := r.Item.DrawingItems; d != nil {
-			for _, dr := range d.Results {
-				ownDrawings[dr.ID] = true
-			}
-			ownDrawingsComplete = d.Pagination.Cursor == ""
-		}
 		return r.Item.WhereUsed.Pagination.Cursor, r.Item.WhereUsed.Results, nil
 	})
 	if err != nil {
@@ -371,7 +318,11 @@ func GetWhereUsed(ctx context.Context, token, hubID, itemID string) ([]Component
 	// uniqueness boundary — dedupe by id so a repeat can't double a row.
 	seen := make(map[string]bool, len(all))
 	refs := make([]ComponentRef, 0, len(all))
+	models := make(map[int]string) // row index → root model to check
 	for _, it := range all {
+		if it.Typename == "DrawingItem" {
+			continue
+		}
 		if it.ID != "" {
 			if seen[it.ID] {
 				continue
@@ -392,82 +343,27 @@ func GetWhereUsed(ctx context.Context, token, hubID, itemID string) ([]Component
 				ref.PartNumber = m.Component.PartNumber.String()
 				ref.PartDesc = m.Component.Description.String()
 			}
-			ref.RootModelID = m.ID
-		}
-		// A design is a chain root when its own where-used holds no
-		// design. Drawings do not count as parents. A truncated nested
-		// page proves nothing, so it leaves the flag unset.
-		if w := it.WhereUsed; w != nil && w.Pagination.Cursor == "" {
-			ref.Root = true
-			for _, p := range w.Results {
-				if p.Typename != "DrawingItem" {
-					ref.Root = false
-					break
-				}
-			}
-		}
-		// A drawing is direct when it is one of this design's drawings.
-		// With the own-drawings list cut short, absence proves nothing.
-		if ref.Kind == "drawing" {
-			switch {
-			case ownDrawings[it.ID]:
-				ref.Relation = RelationDirect
-			case ownDrawingsComplete:
-				ref.Relation = RelationIndirect
+			if m.ID != "" {
+				models[len(refs)] = m.ID
 			}
 		}
 		refs = append(refs, ref)
 	}
-	sortWhereUsed(refs)
-	return refs, nil
-}
 
-// sortWhereUsed orders rows direct first, undetermined next, indirect
-// last, keeping the API's order within each group.
-func sortWhereUsed(refs []ComponentRef) {
-	rank := map[string]int{RelationDirect: 0, "": 1, RelationIndirect: 2}
-	sort.SliceStable(refs, func(i, j int) bool {
-		return rank[refs[i].Relation] < rank[refs[j].Relation]
-	})
-}
-
-// NeedsWhereUsedRelations reports whether any row from GetWhereUsed is
-// still waiting for GetWhereUsedRelations.
-func NeedsWhereUsedRelations(refs []ComponentRef) bool {
-	for _, r := range refs {
-		if r.Relation == "" && r.RootModelID != "" {
-			return true
+	verdicts := directRelations(ctx, token, itemID, models)
+	var direct, unchecked []ComponentRef
+	for i, ref := range refs {
+		switch verdicts[i] {
+		case RelationDirect:
+			ref.Relation = RelationDirect
+			direct = append(direct, ref)
+		case relationIndirect, relationNone:
+			// An ancestor further up, or not a current user at all.
+		default:
+			unchecked = append(unchecked, ref)
 		}
 	}
-	return false
-}
-
-// GetWhereUsedRelations is the second half of GetWhereUsed: it decides
-// direct or indirect for the design rows and returns a new, re-sorted
-// list (refs itself is not modified). A row whose check failed keeps an
-// empty Relation; there is no error to return because the rows are
-// already usable without it. A row whose design references nothing in
-// its current version (see relationNone) also stays untagged, and loses
-// Root.
-func GetWhereUsedRelations(ctx context.Context, token, itemID string, refs []ComponentRef) []ComponentRef {
-	out := append([]ComponentRef(nil), refs...)
-	models := make(map[int]string)
-	for i, r := range out {
-		if r.Relation == "" && r.RootModelID != "" {
-			models[i] = r.RootModelID
-		}
-	}
-	for i, rel := range directRelations(ctx, token, itemID, models) {
-		if rel == relationNone {
-			// Not a current user of this item, so not the top of its
-			// parent chain either.
-			out[i].Root = false
-			continue
-		}
-		out[i].Relation = rel
-	}
-	sortWhereUsed(out)
-	return out
+	return append(direct, unchecked...), nil
 }
 
 // relationBatchSize is how many parents one direct/indirect request
@@ -498,21 +394,20 @@ type relationCheck struct {
 	modelID string // parent's root model
 	cursor  string // next page of its relations; empty on the first
 	seen    int    // references read so far, across pages
-	rel     string // RelationDirect / RelationIndirect / relationNone once decided
+	rel     string // RelationDirect / relationIndirect / relationNone once decided
 	failed  bool   // its references could not be read
 }
 
 // relationNone is the internal verdict for a parent whose current
 // version has no references at all. whereUsed lists such items (on live
 // data: documents that used the design in an older version, and hidden
-// wrapper documents), but a design that references nothing cannot hold
-// this one through a sub-assembly either, so calling it indirect would
-// be wrong. Its row is left untagged.
+// wrapper documents). A design that references nothing does not hold
+// this one, so its row is dropped.
 const relationNone = "none"
 
 // directRelations decides, for each parent root model, whether that
 // design references itemID at its own first level. The result maps the
-// caller's key to RelationDirect or RelationIndirect; a parent whose
+// caller's key to RelationDirect or relationIndirect; a parent whose
 // check failed is absent, and one whose current version references
 // nothing at all maps to relationNone.
 //
@@ -659,7 +554,7 @@ func relationBatch(ctx context.Context, token, itemID string, batch []*relationC
 		c.cursor = ar.Pagination.Cursor
 		c.seen += len(ar.Results)
 		if c.cursor == "" {
-			c.rel = RelationIndirect
+			c.rel = relationIndirect
 			if c.seen == 0 {
 				c.rel = relationNone
 			}

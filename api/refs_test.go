@@ -3,9 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -101,10 +99,37 @@ func TestGetOccurrences_DecodesAndPaginates(t *testing.T) {
 	}
 }
 
+// relationsAnswer answers a WhereUsedIsDirect request: holds maps a
+// parent's model id to the design ids at its first level.
+func relationsAnswer(req testutil.GraphQLRequest, holds map[string][]string) testutil.GraphQLResponse {
+	data := map[string]any{}
+	for n := 0; ; n++ {
+		model, ok := req.Variables[fmt.Sprintf("m%d", n)].(string)
+		if !ok {
+			break
+		}
+		results := []map[string]any{}
+		for _, id := range holds[model] {
+			results = append(results, map[string]any{"toModel": map[string]any{"designItem": map[string]any{"id": id}}})
+		}
+		data[fmt.Sprintf("p%d", n)] = map[string]any{"assemblyRelations": map[string]any{
+			"pagination": map[string]any{"cursor": nil}, "results": results}}
+	}
+	return testutil.GraphQLResponse{Data: data}
+}
+
 func TestGetWhereUsed_DecodesItems(t *testing.T) {
 	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
+		if strings.Contains(req.Query, "assemblyRelations(") {
+			return relationsAnswer(req, map[string][]string{"m-robot": {"I1"}})
+		}
 		if !strings.Contains(req.Query, "whereUsed(pagination") {
 			t.Errorf("query missing whereUsed field: %q", req.Query)
+		}
+		// The design's drawings have their own tab and its parents'
+		// parents are not shown, so neither is asked for here.
+		if strings.Contains(req.Query, "drawingItems") || strings.Count(req.Query, "whereUsed(") != 1 {
+			t.Errorf("row query asks for more than the where-used rows: %q", req.Query)
 		}
 		// v3 where-used hangs off the item, not a component version.
 		if req.Variables["hubId"] != "H1" || req.Variables["itemId"] != "I1" {
@@ -121,6 +146,7 @@ func TestGetWhereUsed_DecodesItems(t *testing.T) {
 							"name":         "Robot",
 							"fusionWebUrl": "https://x/robot",
 							"tipRootModel": map[string]any{
+								"id":           "m-robot",
 								"materialName": prop("Aluminum"),
 								"component": map[string]any{
 									"partNumber":  prop("RB-1"),
@@ -136,6 +162,7 @@ func TestGetWhereUsed_DecodesItems(t *testing.T) {
 						},
 						// Design whose root model is unreadable.
 						{"__typename": "DesignItem", "id": "di-bare", "name": "Bare", "tipRootModel": nil},
+						{"__typename": "ConfiguredDesignItem", "id": "cfg", "name": "Configured"},
 					},
 				},
 			},
@@ -147,26 +174,24 @@ func TestGetWhereUsed_DecodesItems(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWhereUsed: %v", err)
 	}
+	// The drawing is not a row. The two that cannot be checked are
+	// listed after the confirmed parent, unconfirmed.
 	if len(got) != 3 {
 		t.Fatalf("len = %d, want 3; got %+v", len(got), got)
 	}
 	wantDesign := ComponentRef{
 		ID: "di-robot", Name: "Robot", PartNumber: "RB-1", PartDesc: "The robot", Material: "Aluminum",
 		DesignItemID: "di-robot", DesignItemName: "Robot", FusionWebURL: "https://x/robot", Kind: "design",
+		Relation: RelationDirect,
 	}
 	if got[0] != wantDesign {
 		t.Errorf("design row = %+v, want %+v", got[0], wantDesign)
 	}
-	// Drawings are where-used results too; Kind is how the UI tells.
-	wantDrawing := ComponentRef{
-		ID: "dw-robot", Name: "Robot Drawing",
-		DesignItemID: "dw-robot", DesignItemName: "Robot Drawing", FusionWebURL: "https://x/robot-dwg", Kind: "drawing",
+	if got[1].ID != "di-bare" || got[1].Kind != "design" || got[1].PartNumber != "" || got[1].Relation != "" {
+		t.Errorf("bare design row decoded wrong: %+v", got[1])
 	}
-	if got[1] != wantDrawing {
-		t.Errorf("drawing row = %+v, want %+v", got[1], wantDrawing)
-	}
-	if got[2].ID != "di-bare" || got[2].Kind != "design" || got[2].PartNumber != "" {
-		t.Errorf("bare design row decoded wrong: %+v", got[2])
+	if got[2].ID != "cfg" || got[2].Kind != "configured" || got[2].Relation != "" {
+		t.Errorf("configured row decoded wrong: %+v", got[2])
 	}
 }
 
@@ -211,38 +236,37 @@ func TestGetWhereUsed_PaginatesAndDedupes(t *testing.T) {
 	}
 }
 
-// whereUsedFixture answers both halves of a Where Used load for item
-// I1: the row query, and the batched direct/indirect check.
+func whereUsedRows(refs []ComponentRef) string {
+	var rows []string
+	for _, r := range refs {
+		rows = append(rows, r.ID+"="+r.Relation)
+	}
+	return strings.Join(rows, ",")
+}
+
+// TestGetWhereUsed_DirectParentsOnly: the API's whereUsed lists every
+// assembly above the design, drawings, and documents that no longer use
+// it. Only the designs that hold it at their own first level are
+// returned — plus any whose references could not be read, unconfirmed.
 //
-//	top        used only by a drawing → root; reaches I1 through "parent"
-//	top-dwg    drawing of "top"       → indirect
-//	broken     its relation check fails
+//	top        reaches I1 only through "parent"      → dropped
+//	top-dwg    drawing of "top"                      → dropped
+//	own-dwg    drawing of I1 itself                  → dropped (Drawings tab)
 //	parent     holds I1 directly
-//	own-dwg    drawing of I1 itself   → direct (it is in I1's drawingItems)
-//	parent-p2  holds I1 directly, found on the second page of relations
-//	stale      listed by whereUsed, but its current version references nothing
-func whereUsedFixture(t *testing.T, batchSizes *[]int) func(testutil.GraphQLRequest) testutil.GraphQLResponse {
-	// parents is the row's own where-used: the typenames it holds and
-	// whether the page was cut short (a cursor is left).
-	design := func(id, modelID string, more bool, parents ...string) map[string]any {
-		results := []map[string]any{}
-		for _, tn := range parents {
-			results = append(results, map[string]any{"__typename": tn})
-		}
-		var cursor any
-		if more {
-			cursor = "MORE"
-		}
+//	parent-p2  holds I1 directly, found on the second page of its references
+//	stale      its current version references nothing → dropped
+//	broken     its references cannot be read          → kept, unconfirmed
+func TestGetWhereUsed_DirectParentsOnly(t *testing.T) {
+	fakeQuota(t)
+	design := func(id string) map[string]any {
 		return map[string]any{"__typename": "DesignItem", "id": id, "name": id,
-			"tipRootModel": map[string]any{"id": modelID},
-			"whereUsed":    map[string]any{"pagination": map[string]any{"cursor": cursor}, "results": results}}
+			"tipRootModel": map[string]any{"id": "m-" + id}}
 	}
 	drawing := func(id string) map[string]any {
 		return map[string]any{"__typename": "DrawingItem", "id": id, "name": id}
 	}
-	// rels is one parent's page of first-level references.
 	rels := func(cursor any, designIDs ...string) map[string]any {
-		var results []map[string]any
+		results := []map[string]any{}
 		for _, id := range designIDs {
 			results = append(results, map[string]any{"toModel": map[string]any{"designItem": map[string]any{"id": id}}})
 		}
@@ -252,41 +276,26 @@ func whereUsedFixture(t *testing.T, batchSizes *[]int) func(testutil.GraphQLRequ
 			"assemblyRelations": map[string]any{"pagination": map[string]any{"cursor": cursor}, "results": results},
 		}
 	}
-	var mu sync.Mutex
-	return func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
+	var relationRequests int
+	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
 		if strings.Contains(req.Query, "whereUsed(") {
-			// Drawing relations come from the design's own drawings
-			// list, never from asking each drawing for its model.
-			if !strings.Contains(req.Query, "drawingItems(") || strings.Contains(req.Query, "tipDrawing") {
-				t.Errorf("row query should read drawingItems and not tipDrawing: %q", req.Query)
-			}
 			return testutil.GraphQLResponse{Data: map[string]any{"item": map[string]any{
-				"drawingItems": map[string]any{
-					"pagination": map[string]any{"cursor": nil},
-					"results":    []map[string]any{{"id": "own-dwg"}},
-				},
 				"whereUsed": map[string]any{
 					"pagination": map[string]any{"cursor": nil},
 					"results": []map[string]any{
-						design("top", "m-top", false, "DrawingItem"),
-						drawing("top-dwg"),
-						design("broken", "m-broken", false),
-						design("parent", "m-parent", false, "DrawingItem", "DesignItem"),
-						drawing("own-dwg"),
-						// Only drawings so far, but the list was cut short.
-						design("parent-p2", "m-parent-p2", true, "DrawingItem"),
-						design("stale", "m-stale", false),
+						design("top"), drawing("top-dwg"), design("broken"), design("parent"),
+						drawing("own-dwg"), design("parent-p2"), design("stale"),
 					},
 				}}}}
 		}
+		relationRequests++
 		if !strings.Contains(req.Query, "assemblyRelations(scope: INTERNAL_PLUS_DIRECT_EXTERNAL") {
 			t.Errorf("relation check must use the direct-external scope: %q", req.Query)
 		}
 		// The parents arrive aliased p0, p1, … with variables m0, m1, …
 		// and, from the second page on, c0, c1, ….
 		data := map[string]any{}
-		n := 0
-		for ; ; n++ {
+		for n := 0; ; n++ {
 			model, ok := req.Variables[fmt.Sprintf("m%d", n)]
 			if !ok {
 				break
@@ -298,7 +307,6 @@ func whereUsedFixture(t *testing.T, batchSizes *[]int) func(testutil.GraphQLRequ
 			case "m-parent":
 				data[alias] = rels(nil, "other", "I1")
 			case "m-parent-p2":
-				// The match is on the second page.
 				if req.Variables[fmt.Sprintf("c%d", n)] == "P2" {
 					data[alias] = rels(nil, "I1")
 				} else {
@@ -308,111 +316,39 @@ func whereUsedFixture(t *testing.T, batchSizes *[]int) func(testutil.GraphQLRequ
 				data[alias] = map[string]any{"assemblyRelations": map[string]any{
 					"pagination": map[string]any{"cursor": nil}, "results": []map[string]any{}}}
 			case "m-broken":
-				// One unreadable parent fails the whole request.
-				mu.Lock()
-				*batchSizes = append(*batchSizes, -1)
-				mu.Unlock()
-				return testutil.GraphQLResponse{Errors: []string{"boom"}}
+				data[alias] = map[string]any{"assemblyRelations": nil}
 			default:
 				t.Errorf("unexpected relation check: %v", req.Variables)
 			}
 		}
-		mu.Lock()
-		*batchSizes = append(*batchSizes, n)
-		mu.Unlock()
 		return testutil.GraphQLResponse{Data: data}
-	}
-}
-
-func whereUsedRows(refs []ComponentRef) string {
-	var rows []string
-	for _, r := range refs {
-		row := r.ID + "=" + r.Relation
-		if r.Root {
-			row += "(root)"
-		}
-		rows = append(rows, row)
-	}
-	return strings.Join(rows, ",")
-}
-
-// TestGetWhereUsed_RowsFirst: the row query alone tags drawings (from
-// the design's own drawings list) and roots, and leaves design rows
-// untagged for GetWhereUsedRelations — without making that request.
-func TestGetWhereUsed_RowsFirst(t *testing.T) {
-	var batchSizes []int
-	srv := testutil.GraphQLServer(t, whereUsedFixture(t, &batchSizes))
+	})
 	swapEndpoint(t, srv.URL)
 
 	got, err := GetWhereUsed(context.Background(), "tok", "H1", "I1")
 	if err != nil {
 		t.Fatalf("GetWhereUsed: %v", err)
 	}
-	// Root: no design among the row's own parents, and only when that
-	// list is complete ("parent-p2" was cut short).
-	want := "own-dwg=direct,top=(root),broken=(root),parent=,parent-p2=,stale=(root),top-dwg=indirect"
-	if rows := whereUsedRows(got); rows != want {
-		t.Errorf("rows = %s\nwant   %s", rows, want)
+	if rows := whereUsedRows(got); rows != "parent=direct,parent-p2=direct,broken=" {
+		t.Errorf("rows = %s\nwant   parent=direct,parent-p2=direct,broken=", rows)
 	}
-	if len(batchSizes) != 0 {
-		t.Errorf("GetWhereUsed made %d relation requests, want none", len(batchSizes))
-	}
-	if !NeedsWhereUsedRelations(got) {
-		t.Error("NeedsWhereUsedRelations = false with untagged design rows")
+	// All five designs in one request, and one more for the parent with
+	// a second page of references.
+	if relationRequests != 2 {
+		t.Errorf("relation requests = %d, want 2", relationRequests)
 	}
 }
 
-// TestGetWhereUsedRelations_LabelsDirectAndIndirect: v3 whereUsed mixes
-// immediate parents with assemblies further up the tree. Each design
-// row is checked against its own first-level references and the list
-// comes back direct first, without modifying the rows passed in.
-func TestGetWhereUsedRelations_LabelsDirectAndIndirect(t *testing.T) {
-	var batchSizes []int
-	srv := testutil.GraphQLServer(t, whereUsedFixture(t, &batchSizes))
-	swapEndpoint(t, srv.URL)
-
-	rows, err := GetWhereUsed(context.Background(), "tok", "H1", "I1")
-	if err != nil {
-		t.Fatalf("GetWhereUsed: %v", err)
-	}
-	before := whereUsedRows(rows)
-	got := GetWhereUsedRelations(context.Background(), "tok", "I1", rows)
-
-	// Direct, then undetermined (the failed check, and the parent whose
-	// current version references nothing), then indirect.
-	want := "own-dwg=direct,parent=direct,parent-p2=direct,broken=(root),stale=,top=indirect(root),top-dwg=indirect"
-	if r := whereUsedRows(got); r != want {
-		t.Errorf("rows = %s\nwant   %s", r, want)
-	}
-	if whereUsedRows(rows) != before {
-		t.Errorf("input rows were modified: %s", whereUsedRows(rows))
-	}
-
-	// All five parents go out in one request. It fails on the broken
-	// parent, so each is retried alone (4 answers + 1 failure), and the
-	// parent with a second page takes one more request.
-	sort.Ints(batchSizes)
-	if got := fmt.Sprint(batchSizes); got != "[-1 -1 1 1 1 1 1]" {
-		t.Errorf("relation requests = %s, want one failed batch, one failed single, five singles", got)
-	}
-}
-
-// TestGetWhereUsed_DrawingsUndeterminedWhenOwnListTruncated: with more
-// own drawings than one page, a drawing missing from that page may
-// still be the design's own, so it is not called indirect.
-func TestGetWhereUsed_DrawingsUndeterminedWhenOwnListTruncated(t *testing.T) {
+// TestGetWhereUsed_OnlyDrawings: a design used nowhere but drawn makes
+// no relation request and has no rows.
+func TestGetWhereUsed_OnlyDrawings(t *testing.T) {
+	calls := 0
 	srv := testutil.GraphQLServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
+		calls++
 		return testutil.GraphQLResponse{Data: map[string]any{"item": map[string]any{
-			"drawingItems": map[string]any{
-				"pagination": map[string]any{"cursor": "MORE"},
-				"results":    []map[string]any{{"id": "dw-1"}},
-			},
 			"whereUsed": map[string]any{
 				"pagination": map[string]any{"cursor": nil},
-				"results": []map[string]any{
-					{"__typename": "DrawingItem", "id": "dw-1", "name": "dw-1"},
-					{"__typename": "DrawingItem", "id": "dw-99", "name": "dw-99"},
-				},
+				"results":    []map[string]any{{"__typename": "DrawingItem", "id": "dw-1", "name": "dw-1"}},
 			}}}}
 	})
 	swapEndpoint(t, srv.URL)
@@ -421,8 +357,8 @@ func TestGetWhereUsed_DrawingsUndeterminedWhenOwnListTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWhereUsed: %v", err)
 	}
-	if rows := whereUsedRows(got); rows != "dw-1=direct,dw-99=" {
-		t.Errorf("rows = %s, want dw-1=direct,dw-99=", rows)
+	if len(got) != 0 || calls != 1 {
+		t.Errorf("rows = %+v calls = %d, want no rows from one request", got, calls)
 	}
 }
 
@@ -639,15 +575,14 @@ func TestGetWhereUsed_BatchesRelationChecks(t *testing.T) {
 	})
 	swapEndpoint(t, srv.URL)
 
-	rows, err := GetWhereUsed(context.Background(), "tok", "H1", "I1")
+	got, err := GetWhereUsed(context.Background(), "tok", "H1", "I1")
 	if err != nil {
 		t.Fatalf("GetWhereUsed: %v", err)
 	}
-	got := GetWhereUsedRelations(context.Background(), "tok", "I1", rows)
 	if relationRequests != 1 {
 		t.Errorf("relation requests = %d, want 1 for three parents", relationRequests)
 	}
-	if r := whereUsedRows(got); r != "b=direct,a=indirect,c=indirect" {
+	if r := whereUsedRows(got); r != "b=direct" {
 		t.Errorf("rows = %s", r)
 	}
 }
@@ -672,14 +607,14 @@ func relationServer(t *testing.T, relations func(req testutil.GraphQLRequest) te
 	swapEndpoint(t, srv.URL)
 }
 
-// TestGetWhereUsedRelations_UnreadableParentCostsNoExtraRequests: a
+// TestGetWhereUsed_UnreadableParentCostsNoExtraRequests: a
 // document with damaged data answers DATA_HAS_ERROR on its references —
 // labelled UNKNOWN, at a shallow path, the shape of flakiness — beside
 // the other parents' answers. That used to be retried three times and
 // then asked again one parent at a time: 3 + 3 requests here, 3 + 25
-// for a full batch. It is one request; the damaged parent alone stays
-// untagged.
-func TestGetWhereUsedRelations_UnreadableParentCostsNoExtraRequests(t *testing.T) {
+// for a full batch. It is one request; the damaged parent alone is
+// listed unconfirmed.
+func TestGetWhereUsed_UnreadableParentCostsNoExtraRequests(t *testing.T) {
 	fakeQuota(t)
 	var relationRequests int
 	relationServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
@@ -691,23 +626,22 @@ func TestGetWhereUsedRelations_UnreadableParentCostsNoExtraRequests(t *testing.T
 			"errors":[{"message":"DATA_LOSS: Data has error (file save snapshot)","path":["p1","assemblyRelations"],"extensions":{"code":"DATA_HAS_ERROR","errorType":"UNKNOWN","service":"mfgdm-core"}}]}`}
 	})
 
-	rows, err := GetWhereUsed(context.Background(), "tok", "H1", "I1")
+	got, err := GetWhereUsed(context.Background(), "tok", "H1", "I1")
 	if err != nil {
 		t.Fatalf("GetWhereUsed: %v", err)
 	}
-	got := GetWhereUsedRelations(context.Background(), "tok", "I1", rows)
 	if relationRequests != 1 {
 		t.Errorf("relation requests = %d, want 1", relationRequests)
 	}
-	if r := whereUsedRows(got); r != "a=direct,b=,c=indirect" {
-		t.Errorf("rows = %s, want a=direct,b=,c=indirect", r)
+	if r := whereUsedRows(got); r != "a=direct,b=" {
+		t.Errorf("rows = %s, want a=direct,b=", r)
 	}
 }
 
-// TestGetWhereUsedRelations_FlakyBatchIsNotSplit: a batch that kept
+// TestGetWhereUsed_FlakyBatchIsNotSplit: a batch that kept
 // failing transiently is not asked again parent by parent — that would
 // be the same failure once more for each of them.
-func TestGetWhereUsedRelations_FlakyBatchIsNotSplit(t *testing.T) {
+func TestGetWhereUsed_FlakyBatchIsNotSplit(t *testing.T) {
 	fakeQuota(t)
 	prev := retryBackoffs
 	retryBackoffs = []time.Duration{0, 0, 0}
@@ -718,25 +652,24 @@ func TestGetWhereUsedRelations_FlakyBatchIsNotSplit(t *testing.T) {
 		return testutil.GraphQLResponse{RawBody: `{"data":null,"errors":[{"message":"Unknown Internal Server Error","extensions":{"errorType":"UNKNOWN"}}]}`}
 	})
 
-	rows, err := GetWhereUsed(context.Background(), "tok", "H1", "I1")
+	got, err := GetWhereUsed(context.Background(), "tok", "H1", "I1")
 	if err != nil {
 		t.Fatalf("GetWhereUsed: %v", err)
 	}
-	got := GetWhereUsedRelations(context.Background(), "tok", "I1", rows)
 	if relationRequests != len(retryBackoffs) {
 		t.Errorf("relation requests = %d, want %d (one batch, retried; no per-parent requests)", relationRequests, len(retryBackoffs))
 	}
-	for _, r := range got {
-		if r.Relation != "" {
-			t.Errorf("%s tagged %q after a failed check, want untagged", r.Name, r.Relation)
-		}
+	// Nothing could be checked, so nothing is hidden: every design row
+	// is listed, unconfirmed.
+	if r := whereUsedRows(got); r != "a=,b=,c=" {
+		t.Errorf("rows = %s, want a=,b=,c=", r)
 	}
 }
 
-// TestGetWhereUsedRelations_RefusedBatchIsAskedPerParent: a refusal is
+// TestGetWhereUsed_RefusedBatchIsAskedPerParent: a refusal is
 // an answer about one parent (a model that no longer resolves nulls its
 // root field), so the others are still asked for, one at a time.
-func TestGetWhereUsedRelations_RefusedBatchIsAskedPerParent(t *testing.T) {
+func TestGetWhereUsed_RefusedBatchIsAskedPerParent(t *testing.T) {
 	fakeQuota(t)
 	var relationRequests atomic.Int32
 	relationServer(t, func(req testutil.GraphQLRequest) testutil.GraphQLResponse {
@@ -750,11 +683,10 @@ func TestGetWhereUsedRelations_RefusedBatchIsAskedPerParent(t *testing.T) {
 		}}}}
 	})
 
-	rows, err := GetWhereUsed(context.Background(), "tok", "H1", "I1")
+	got, err := GetWhereUsed(context.Background(), "tok", "H1", "I1")
 	if err != nil {
 		t.Fatalf("GetWhereUsed: %v", err)
 	}
-	got := GetWhereUsedRelations(context.Background(), "tok", "I1", rows)
 	if relationRequests.Load() != 4 {
 		t.Errorf("relation requests = %d, want 4 (the batch, then each of three parents)", relationRequests.Load())
 	}

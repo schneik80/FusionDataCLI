@@ -309,6 +309,14 @@ func gqlQueryOnce(ctx context.Context, token string, body []byte, vars map[strin
 		if (lost || len(e.Path) <= 2) && e.Extensions.ErrorType == "UNKNOWN" && !deterministicCodes[e.Extensions.Code] {
 			transient = true
 		}
+		// The same failure without the UNKNOWN label: the v3 item
+		// service answers a slow whereUsed with a path-less
+		// INTERNAL_SERVER_ERROR about one time in three, sometimes with
+		// part of the rows. Nothing says which part is missing, so none
+		// of it is used and the request is asked again.
+		if len(e.Path) == 0 && e.Extensions.Code == "INTERNAL_SERVER_ERROR" {
+			transient = true
+		}
 	}
 	gerr := fmt.Errorf("GraphQL errors: %s", strings.Join(msgs, "; "))
 	switch {

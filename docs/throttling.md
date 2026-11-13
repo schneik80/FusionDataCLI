@@ -79,7 +79,7 @@ Holding the down arrow bought a details query — and, with a tab other than Det
 | Hub list | 511 | 11 |
 | Project list (70 projects) | 1,132 | 632 |
 | Details | 88 | 48 |
-| Where Used (first page) | 777 | 327 |
+| Where Used (first page) | 777 | 211 |
 | Drawings (first page) | 316 | 76 |
 | Show in Location (3 folders deep) | 47 points, 4 requests | 19 points, 1 request |
 
@@ -91,7 +91,7 @@ Holding the down arrow bought a details query — and, with a tab other than Det
 - **Background budget.** Requests marked with `api.Background(ctx)` — the classification pages — are held to 5,000 points a minute, leaving the rest of the quota for navigation and for other sessions on the same account.
 - **Listings are kept for two minutes** (`ui/listings.go`). Going back to a parent folder, or into a folder just left, re-sent both of its requests. A project list or a container's contents are now served from memory for two minutes; `[r]` always asks again. Details and the tabs were already cached for the session.
 - **One unreadable Where Used parent no longer multiplies requests.** A document with damaged data answers `DATA_HAS_ERROR` (labelled `UNKNOWN`) on its `assemblyRelations`, beside the other parents' answers. The batch was retried three times as flaky and then asked again one parent at a time: up to 28 requests for a batch of 25. `DATA_HAS_ERROR` is now a deterministic code, the batch is one request, and that parent alone stays untagged. A batch is asked again per parent only when it was refused outright; one that timed out or kept failing transiently is not.
-- **Retry rule narrowed.** A transient is an `UNKNOWN` error at or near the root whose code is not one that describes the data (`EXCEPTION_CLOSED_COMMUNITY`, `DATA_HAS_ERROR`, `FORBIDDEN`, `UNAUTHORIZED`, `BAD_REQUEST`, `BAD_USER_INPUT`, `GRAPHQL_VALIDATION_FAILED`). An error that leaves the root field intact passes the data through; one that nulls the root fails at once. Error text now carries the code and the path, so the next mislabelled error is recognisable on sight.
+- **Retry rule narrowed.** A transient is an `UNKNOWN` error at or near the root whose code is not one that describes the data (`EXCEPTION_CLOSED_COMMUNITY`, `DATA_HAS_ERROR`, `FORBIDDEN`, `UNAUTHORIZED`, `BAD_REQUEST`, `BAD_USER_INPUT`, `GRAPHQL_VALIDATION_FAILED`). A path-less `INTERNAL_SERVER_ERROR` is transient too: the v3 item service answers a slow `whereUsed` that way about one time in three. An error that leaves the root field intact passes the data through; one that nulls the root fails at once. Error text now carries the code and the path, so the next mislabelled error is recognisable on sight.
 - **Details wait for the cursor to rest** (150 ms), and an answer for a row the cursor has left is cached but not shown.
 - **Locate asks for six ancestors in one query**, and continues from the last only for deeper trees.
 
@@ -100,7 +100,7 @@ Holding the down arrow bought a details query — and, with a tab other than Det
 - **Combining the folder and document lists into one request.** It would save a round-trip and no points; the two already run concurrently.
 - **Aliasing unrelated requests together.** No point saving, and one failure would take its neighbours with it.
 - **The project list's remaining 316 points a page.** A project row costs 5 points by itself, and `alternativeIdentifiers` is needed for Open in Fusion.
-- **Where Used at 327 points.** What remains is the per-row model properties and the nested `whereUsed` that finds root parents; both are shown.
+- **Where Used at 211 points.** What remains is the per-row model id and properties: the id is needed to tell direct parents from the rest, and the properties are shown.
 - **Uses** was already cheap (27 points for 50 rows).
 
 ## Limits of this review
