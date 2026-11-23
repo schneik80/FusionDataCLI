@@ -158,7 +158,7 @@ git clone https://github.com/schneik80/FusionDataCLI
 cd FusionDataCLI
 ```
 
-**With your own APS app** (register a public client at [aps.autodesk.com/myapps](https://aps.autodesk.com/myapps), redirect URI `http://localhost:7879/callback`, scope `data:read`):
+**With your own APS app** (register a public client at [aps.autodesk.com/myapps](https://aps.autodesk.com/myapps), redirect URI `http://localhost:7879/callback`, scopes `data:read data:write`):
 
 ```sh
 make build CLIENT_ID=your-client-id
@@ -185,6 +185,7 @@ APS_CLIENT_ID=your-client-id ./fusiondatacli
 | [`docs/navigation.md`](docs/navigation.md) | Three-column browser, details-pane tabs, Show in Location, mouse, themes |
 | [`docs/api.md`](docs/api.md) | APS Manufacturing Data Model GraphQL queries, retry behaviour, debug logging |
 | [`docs/mfgdm-report.md`](docs/mfgdm-report.md) | The `-mfgdm-report` hub audit: flags, findings, accuracy and throttling |
+| [`docs/cost-watch.md`](docs/cost-watch.md) | The `-cost-watch` demo: watch a project and write an Estimated Cost to each saved design |
 | [`docs/throttling.md`](docs/throttling.md) | Query points, the per-minute quota, and how the browser stays under it |
 | [`docs/authentication.md`](docs/authentication.md) | OAuth PKCE flow, token storage, refresh |
 | [`docs/architecture.md`](docs/architecture.md) | C4 diagrams, package layout, data flow, performance, resilience |

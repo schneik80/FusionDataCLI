@@ -27,7 +27,7 @@ sequenceDiagram
     App->>LS: Start HTTP listener on localhost:7879/callback
     App->>B: Open auth URL (OS exec: open / xdg-open / rundll32)
 
-    B->>APS: GET /authentication/v2/authorize<br/>?client_id=…&response_type=code<br/>&redirect_uri=http://localhost:7879/callback<br/>&scope=data:read user-profile:read<br/>&code_challenge=…&code_challenge_method=S256
+    B->>APS: GET /authentication/v2/authorize<br/>?client_id=…&response_type=code<br/>&redirect_uri=http://localhost:7879/callback<br/>&scope=data:read data:write user-profile:read<br/>&code_challenge=…&code_challenge_method=S256
 
     APS->>U: Render Autodesk login page
     U->>APS: Enter credentials, grant consent
@@ -107,7 +107,7 @@ sequenceDiagram
 | Token exchange / refresh | `https://developer.api.autodesk.com/authentication/v2/token` |
 | Local redirect receiver | `http://localhost:7879/callback` |
 
-**Required scopes:** `data:read user-profile:read`
+**Required scopes:** `data:read data:write user-profile:read` (`data:write` is used only by [`-cost-watch`](cost-watch.md))
 
 ---
 

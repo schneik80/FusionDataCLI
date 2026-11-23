@@ -21,7 +21,7 @@ Register a **public client** app at [aps.autodesk.com/myapps](https://aps.autode
 
 - **App type:** Desktop / Native
 - **Callback URL:** `http://localhost:7879/callback`
-- **Scopes:** `data:read`, `user-profile:read`
+- **Scopes:** `data:read`, `data:write`, `user-profile:read`
 
 Copy the **Client ID**. No client secret is needed for public clients.
 

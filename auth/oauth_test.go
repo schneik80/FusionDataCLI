@@ -66,7 +66,7 @@ func TestBuildAuthURL_Shape(t *testing.T) {
 		"client_id":             "my-client-id",
 		"response_type":         "code",
 		"redirect_uri":          CallbackURL,
-		"scope":                 "data:read user-profile:read",
+		"scope":                 "data:read data:write user-profile:read",
 		"code_challenge":        "my-challenge",
 		"code_challenge_method": "S256",
 	}

@@ -1,10 +1,12 @@
 package auth
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/schneik80/FusionDataCLI/config"
@@ -77,4 +79,33 @@ func DeleteTokens() error {
 		return err
 	}
 	return nil
+}
+
+// HasScope reports whether the access token was granted scope. APS
+// access tokens are JWTs that list their scopes; a token that cannot be
+// read that way is given the benefit of the doubt, and the API decides.
+func (t *TokenData) HasScope(scope string) bool {
+	if t == nil {
+		return false
+	}
+	parts := strings.Split(t.AccessToken, ".")
+	if len(parts) != 3 {
+		return true
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return true
+	}
+	var claims struct {
+		Scope []string `json:"scope"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || len(claims.Scope) == 0 {
+		return true
+	}
+	for _, s := range claims.Scope {
+		if s == scope {
+			return true
+		}
+	}
+	return false
 }

@@ -32,13 +32,13 @@ type reportFlags struct {
 func registerReportFlags(fs *flag.FlagSet) *reportFlags {
 	f := &reportFlags{}
 	fs.BoolVar(&f.run, "mfgdm-report", false, "walk a whole hub and write a Markdown report of documents and folders missing MFGDM data (no interactive browser)")
-	fs.StringVar(&f.hub, "hub", "", "with -mfgdm-report: hub name or id (required when the account sees more than one hub)")
-	fs.StringVar(&f.projects, "project", "", "with -mfgdm-report: only these projects, comma-separated names or ids (default: every project)")
+	fs.StringVar(&f.hub, "hub", "", "with -mfgdm-report or -cost-watch: hub name or id (required when the account sees more than one hub)")
+	fs.StringVar(&f.projects, "project", "", "with -mfgdm-report: only these projects, comma-separated names or ids (default: every project); with -cost-watch: the one project to watch")
 	fs.StringVar(&f.out, "out", "", "with -mfgdm-report: report file (default: mfgdm-report-<hub>-<timestamp>.md in the current directory)")
-	fs.IntVar(&f.concurrency, "concurrency", 4, "with -mfgdm-report: most API requests in flight at once; lowered automatically when the API throttles")
+	fs.IntVar(&f.concurrency, "concurrency", 4, "with -mfgdm-report: most API requests in flight at once, lowered automatically when the API throttles; with -cost-watch: designs priced and written at once")
 	fs.IntVar(&f.pointsPerMinute, "points-per-minute", audit.DefaultPointsPerMinute, "with -mfgdm-report: API query points to spend per minute; lowered automatically when the API throttles")
 	fs.BoolVar(&f.includeInactive, "include-inactive", false, "with -mfgdm-report: also walk projects that are not active (the API usually refuses them)")
-	fs.BoolVar(&f.debug, "debug", false, "with -mfgdm-report: log every request and response to debug.log in the config directory")
+	fs.BoolVar(&f.debug, "debug", false, "with -mfgdm-report or -cost-watch: log every request and response to debug.log in the config directory")
 	return f
 }
 

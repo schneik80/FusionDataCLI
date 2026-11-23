@@ -31,6 +31,7 @@ func main() {
 	}()
 
 	report := registerReportFlags(flag.CommandLine)
+	watch := registerCostWatchFlags(flag.CommandLine)
 	flag.Parse()
 
 	cfg, cfgErr := config.Load()
@@ -39,6 +40,12 @@ func main() {
 	// Markdown file as the result.
 	if report.run {
 		os.Exit(runReport(report, cfg, cfgErr))
+	}
+
+	// -cost-watch is the other batch command: it watches one project
+	// and writes an Estimated Cost to each newly saved design.
+	if watch.run {
+		os.Exit(runCostWatch(watch, report, cfg, cfgErr))
 	}
 
 	p := tea.NewProgram(
